@@ -2,7 +2,7 @@
 
 This app translates text from an image in real time and draws translated text on top of the original image **without replacing or editing the image itself**.
 
-It is designed for reading manga or other foreign-language image content in the same tab/page.
+It is designed for reading comics, manga, or any foreign-language image content in the same tab/page.
 
 ## Features
 
@@ -65,7 +65,7 @@ It is designed for reading manga or other foreign-language image content in the 
 - Source language (`auto` by default)
 - Target language (`en` default)
 - Confidence threshold (0-100)
-- Reading order: LTR or manga-friendly RTL
+- Reading order: LTR or manga/comics-friendly RTL
 - Voice + speed for TTS
 - Auto-refresh translation when image changes
 - Auto-play translated text
@@ -76,11 +76,11 @@ It is designed for reading manga or other foreign-language image content in the 
 - Some sites block cross-origin image loads; upload file if URL load fails.
 - Low-confidence text is visually marked.
 - If no text found or API fails, app keeps running and reports status.
-- For production use, add rate limiting and stronger API key controls.
+- API key should stay on backend only (never in frontend code).
 
 ## Optional improvements
 
 - Better OCR model/language packs
 - Region grouping (speech-bubble level instead of word level)
 - Batch prefetching next pages
-- Browser extension wrapper for direct in-page manga site integration
+- Browser extension wrapper for direct in-page comics/image site integration

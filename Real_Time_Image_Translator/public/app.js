@@ -53,6 +53,19 @@ const readAsDataUrl = (file) =>
     reader.readAsDataURL(file);
   });
 
+const toSafeImageUrl = (value) => {
+  try {
+    const parsed = new URL(value);
+    const allowedProtocols = new Set(["http:", "https:"]);
+    if (!allowedProtocols.has(parsed.protocol)) {
+      return null;
+    }
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+};
+
 const getImageCacheKey = () => {
   const src = els.sourceImage.currentSrc || els.sourceImage.src || "";
   const minConfidence = Number(els.minConfidence.value) || 0;
@@ -303,16 +316,16 @@ els.fileInput.addEventListener("change", async (event) => {
 });
 
 els.loadUrlBtn.addEventListener("click", () => {
-  const url = els.imageUrlInput.value.trim();
-  if (!url) {
-    setStatus("Provide a valid image URL.", true);
+  const safeUrl = toSafeImageUrl(els.imageUrlInput.value.trim());
+  if (!safeUrl) {
+    setStatus("Provide a valid http/https image URL.", true);
     return;
   }
 
   stopAudio();
   queueIndex = 0;
 
-  els.sourceImage.src = url;
+  els.sourceImage.src = safeUrl;
   setStatus("Image URL loaded.");
 });
 

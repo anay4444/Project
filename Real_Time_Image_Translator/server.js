@@ -1,6 +1,7 @@
 const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
+const rateLimit = require("express-rate-limit");
 
 dotenv.config();
 
@@ -10,6 +11,14 @@ const port = Number(process.env.PORT || 3000);
 app.use(cors());
 app.use(express.json({ limit: "5mb" }));
 app.use(express.static("public"));
+app.use(
+  rateLimit({
+    windowMs: 60 * 1000,
+    limit: 120,
+    standardHeaders: "draft-7",
+    legacyHeaders: false
+  })
+);
 
 const buildKokoroHeaders = () => {
   const headers = { "Content-Type": "application/json" };
