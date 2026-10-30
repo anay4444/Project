@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Real-Time Image Translator</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js" defer></script>
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <main>
+      <h1>Real-Time Image Translator</h1>
+      <p class="sub">Keep your manga/image unchanged and read translation on the same page.</p>
+
+      <div class="toolbar">
+        <label>
+          Upload image
+          <input id="fileInput" type="file" accept="image/*" />
+        </label>
+        <label>
+          Or image URL
+          <input id="imageUrlInput" type="url" placeholder="https://example.com/page.png" />
+        </label>
+        <button id="loadUrlBtn" type="button">Load URL</button>
+      </div>
+
+      <section class="viewer-wrap">
+        <div class="image-stage" id="imageStage">
+          <img id="sourceImage" alt="Source" crossorigin="anonymous" />
+          <div id="overlayLayer"></div>
+        </div>
+      </section>
+    </main>
+
+    <aside class="floating-controls" id="controls">
+      <h2>Controls</h2>
+      <label><input id="overlayToggle" type="checkbox" checked /> Show overlay</label>
+      <label><input id="autoRefreshToggle" type="checkbox" checked /> Auto-refresh on changes</label>
+      <label>
+        Source language
+        <input id="sourceLang" type="text" value="auto" />
+      </label>
+      <label>
+        Target language
+        <input id="targetLang" type="text" value="en" />
+      </label>
+      <label>
+        Min confidence (0-100)
+        <input id="minConfidence" type="number" min="0" max="100" value="55" />
+      </label>
+      <label>
+        Reading order
+        <select id="readingOrder">
+          <option value="ltr">Top-to-bottom, left-to-right</option>
+          <option value="rtl">Top-to-bottom, right-to-left (manga)</option>
+        </select>
+      </label>
+      <label>
+        Voice
+        <input id="voiceInput" type="text" value="af_heart" />
+      </label>
+      <label>
+        Speed
+        <input id="speedInput" type="number" min="0.5" max="2" step="0.1" value="1" />
+      </label>
+      <label><input id="autoPlayToggle" type="checkbox" /> Auto-play translated text</label>
+      <div class="buttons">
+        <button id="translateBtn" type="button">Translate now</button>
+        <button id="playBtn" type="button">Play</button>
+        <button id="pauseBtn" type="button">Pause</button>
+        <button id="stopBtn" type="button">Stop</button>
+        <button id="nextBtn" type="button">Next</button>
+      </div>
+      <p class="hint">Hotkeys: Ctrl+Shift+T overlay, Ctrl+Shift+R translate, Ctrl+Shift+P play/pause.</p>
+      <p id="statusText">Status: Ready</p>
+    </aside>
+  </body>
+</html>
