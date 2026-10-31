@@ -3,18 +3,18 @@ const assert = require("node:assert/strict");
 const http = require("node:http");
 const { createApp } = require("../server");
 
-const request = (server, path, body) =>
+const request = (server, path, body, headers = {}) =>
   new Promise((resolve, reject) => {
     const payload = body === undefined ? "" : JSON.stringify(body);
     const req = http.request({
       port: server.address().port,
       path,
       method: body === undefined ? "GET" : "POST",
-      headers: body === undefined ? {} : { "content-type": "application/json", "content-length": Buffer.byteLength(payload) }
+      headers: body === undefined ? headers : { ...headers, "content-type": "application/json", "content-length": Buffer.byteLength(payload) }
     }, (res) => {
       const chunks = [];
       res.on("data", (chunk) => chunks.push(chunk));
-      res.on("end", () => resolve({ status: res.statusCode, body: Buffer.concat(chunks) }));
+      res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));
     });
     req.on("error", reject);
     req.end(payload);
@@ -52,7 +52,7 @@ test("rejects oversized translation input before contacting upstream", async (t)
   assert.equal(result.status, 400);
 });
 
-test("returns a generic timeout error for translation failures", async (t) => {
+test("returns a generic upstream error without leaking details", async (t) => {
   const originalFetch = global.fetch;
   process.env.TRANSLATION_URL = "http://translation.test/translate";
   global.fetch = async () => {
@@ -65,7 +65,7 @@ test("returns a generic timeout error for translation failures", async (t) => {
   });
 
   const result = await request(server, "/api/translate", { texts: ["hello"] });
-  assert.equal(result.status, 504);
+  assert.equal(result.status, 502);
   assert.doesNotMatch(result.body.toString(), /private upstream detail/);
 });
 
@@ -107,4 +107,94 @@ test("caps concurrent translation requests", async (t) => {
 
   const results = await Promise.all(Array.from({ length: 5 }, () => request(server, "/api/translate", { texts: ["hello"] })));
   assert.equal(results.filter((result) => result.status === 429).length, 1);
+});
+
+test("requires a session when deployment authentication is enabled", async (t) => {
+  const previousPassword = process.env.TRANSLATOR_ACCESS_PASSWORD;
+  process.env.TRANSLATOR_ACCESS_PASSWORD = "correct horse";
+  process.env.TRANSLATION_URL = "http://translation.test/translate";
+  const originalFetch = global.fetch;
+  global.fetch = async () => new Response(JSON.stringify({ translatedText: "hola" }), { status: 200 });
+  const server = createApp().listen(0);
+  t.after(() => {
+    server.close();
+    global.fetch = originalFetch;
+    if (previousPassword === undefined) delete process.env.TRANSLATOR_ACCESS_PASSWORD;
+    else process.env.TRANSLATOR_ACCESS_PASSWORD = previousPassword;
+  });
+
+  assert.equal((await request(server, "/api/translate", { texts: ["hello"] })).status, 401);
+  const login = await request(server, "/api/login", { password: "correct horse" });
+  assert.equal(login.status, 200);
+  const cookie = login.headers?.["set-cookie"]?.[0];
+  assert.ok(cookie);
+  const authorized = await request(server, "/api/translate", { texts: ["hello"] }, { cookie });
+  assert.equal(authorized.status, 200);
+});
+
+test("rejects unsupported providers and missing Google credentials", async (t) => {
+  const originalFetch = global.fetch;
+  const previousProvider = process.env.TRANSLATION_PROVIDER;
+  const previousKey = process.env.TRANSLATION_API_KEY;
+  process.env.TRANSLATION_PROVIDER = "unknown";
+  process.env.TRANSLATION_URL = "http://translation.test/translate";
+  const server = createApp().listen(0);
+  t.after(() => {
+    server.close();
+    global.fetch = originalFetch;
+    if (previousProvider === undefined) delete process.env.TRANSLATION_PROVIDER;
+    else process.env.TRANSLATION_PROVIDER = previousProvider;
+    if (previousKey === undefined) delete process.env.TRANSLATION_API_KEY;
+    else process.env.TRANSLATION_API_KEY = previousKey;
+  });
+
+  assert.equal((await request(server, "/api/translate", { texts: ["hello"] })).status, 503);
+  process.env.TRANSLATION_PROVIDER = "google";
+  delete process.env.TRANSLATION_API_KEY;
+  assert.equal((await request(server, "/api/translate", { texts: ["hello"] })).status, 503);
+  process.env.TRANSLATION_API_KEY = "server-only-key";
+  let calledUrl;
+  global.fetch = async (url) => {
+    calledUrl = String(url);
+    return new Response(JSON.stringify({ data: { translations: [{ translatedText: "hola" }] } }), { status: 200 });
+  };
+  assert.equal((await request(server, "/api/translate", { texts: ["hello"] })).status, 200);
+  assert.match(calledUrl, /[?&]key=server-only-key/);
+});
+
+test("returns 502 for malformed or non-success upstream responses", async (t) => {
+  const originalFetch = global.fetch;
+  process.env.TRANSLATION_PROVIDER = "libretranslate";
+  process.env.TRANSLATION_URL = "http://translation.test/translate";
+  const server = createApp().listen(0);
+  t.after(() => {
+    server.close();
+    global.fetch = originalFetch;
+  });
+
+  global.fetch = async () => new Response("not json", { status: 200 });
+  assert.equal((await request(server, "/api/translate", { texts: ["hello"] })).status, 502);
+  global.fetch = async () => new Response("upstream failure", { status: 500 });
+  assert.equal((await request(server, "/api/translate", { texts: ["hello"] })).status, 502);
+});
+
+test("returns 504 when the overall translation deadline aborts work", async (t) => {
+  const originalFetch = global.fetch;
+  const previousDeadline = process.env.TRANSLATION_DEADLINE_MS;
+  process.env.TRANSLATION_PROVIDER = "libretranslate";
+  process.env.TRANSLATION_URL = "http://translation.test/translate";
+  process.env.TRANSLATION_DEADLINE_MS = "1000";
+  global.fetch = (_url, { signal }) => new Promise((_resolve, reject) => {
+    signal.addEventListener("abort", () => reject(new DOMException("deadline", "TimeoutError")), { once: true });
+  });
+  const server = createApp().listen(0);
+  t.after(() => {
+    server.close();
+    global.fetch = originalFetch;
+    if (previousDeadline === undefined) delete process.env.TRANSLATION_DEADLINE_MS;
+    else process.env.TRANSLATION_DEADLINE_MS = previousDeadline;
+  });
+
+  const result = await request(server, "/api/translate", { texts: ["hello"] });
+  assert.equal(result.status, 504);
 });

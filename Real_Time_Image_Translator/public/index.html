@@ -5,7 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Real-Time Image Translator</title>
     <link rel="stylesheet" href="styles.css" />
-    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js" defer></script>
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js" integrity="sha384-GJqSu7vueQ9qN0E9yLPb3Wtpd7OrgK8KmYzC8T1IysG1bcvxvIO4qtYR/D3A991F" crossorigin="anonymous" defer></script>
+    <script src="cache.js" defer></script>
+    <script src="image-validation.js" defer></script>
     <script src="app.js" defer></script>
   </head>
   <body>
@@ -66,6 +68,13 @@
         <input id="speedInput" type="number" min="0.5" max="2" step="0.1" value="1" />
       </label>
       <label><input id="autoPlayToggle" type="checkbox" /> Auto-play translated text</label>
+      <form id="loginForm" hidden>
+        <label>
+          Access password
+          <input id="passwordInput" type="password" autocomplete="current-password" />
+        </label>
+        <button type="submit">Sign in</button>
+      </form>
       <div class="buttons">
         <button id="translateBtn" type="button">Translate now</button>
         <button id="playBtn" type="button">Play</button>

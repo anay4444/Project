@@ -14,6 +14,8 @@ const els = {
   voiceInput: document.getElementById("voiceInput"),
   speedInput: document.getElementById("speedInput"),
   autoPlayToggle: document.getElementById("autoPlayToggle"),
+  loginForm: document.getElementById("loginForm"),
+  passwordInput: document.getElementById("passwordInput"),
   translateBtn: document.getElementById("translateBtn"),
   playBtn: document.getElementById("playBtn"),
   pauseBtn: document.getElementById("pauseBtn"),
@@ -29,13 +31,38 @@ let currentAudio = null;
 let queueIndex = 0;
 let translationRun = 0;
 let translationInFlight = false;
+let translationController = null;
+let imageObjectUrl = null;
 
-const resultCache = new Map();
+const resultCache = createLruCache(8);
 const imageObserver = new MutationObserver(() => {
+  cancelTranslation();
   if (els.autoRefreshToggle.checked && els.sourceImage.src) {
-    translateImage().catch((error) => setStatus(error.message, true));
+    setTimeout(() => translateImage().catch((error) => setStatus(error.message, true)), 0);
   }
 });
+
+const loadImage = (src, size) =>
+  new Promise((resolve, reject) => {
+    const image = new Image();
+    image.crossOrigin = "anonymous";
+    image.onload = () => {
+      const error = validateImageInfo({ size, width: image.naturalWidth, height: image.naturalHeight });
+      if (error) {
+        reject(new Error(error));
+        return;
+      }
+      resolve();
+    };
+    image.onerror = () => reject(new Error("Image could not be loaded."));
+    image.src = src;
+  });
+
+const cancelTranslation = () => {
+  translationRun += 1;
+  translationController?.abort();
+  translationController = null;
+};
 
 imageObserver.observe(els.sourceImage, { attributes: true, attributeFilter: ["src"] });
 
@@ -44,18 +71,19 @@ const setStatus = (message, isError = false) => {
   els.statusText.style.color = isError ? "#ff8888" : "#f1f1f1";
 };
 
+const checkSession = async () => {
+  const response = await fetch("/api/session");
+  const payload = await response.json();
+  els.loginForm.hidden = !payload.required || payload.authenticated;
+  if (payload.required && !payload.authenticated) {
+    setStatus("Sign in to use translation and read-aloud.");
+  }
+};
+
 const htmlDecode = (input) => {
   const parser = new DOMParser();
   return parser.parseFromString(input, "text/html").documentElement.textContent || "";
 };
-
-const readAsDataUrl = (file) =>
-  new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result));
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
 
 const toSafeImageUrl = (value) => {
   try {
@@ -196,7 +224,7 @@ const groupWordsIntoLines = (words, order) => {
   });
 };
 
-const performTranslation = async (texts, source, target) => {
+const performTranslation = async (texts, source, target, signal) => {
   const response = await fetch("/api/translate", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -204,7 +232,8 @@ const performTranslation = async (texts, source, target) => {
       texts,
       source: source === "auto" ? undefined : source,
       target
-    })
+    }),
+    signal
   });
 
   const payload = await response.json();
@@ -322,6 +351,7 @@ const translateImage = async () => {
   }
 
   const run = ++translationRun;
+  translationController = new AbortController();
   try {
     const minConfidence = Number(els.minConfidence.value) || 0;
     const sourceLanguage = els.sourceLang.value.trim() || "auto";
@@ -342,7 +372,8 @@ const translateImage = async () => {
     const translatedTexts = await performTranslation(
       orderedRegions.map((region) => region.sourceText),
       sourceLanguage,
-      targetLanguage
+      targetLanguage,
+      translationController.signal
     );
     if (run !== translationRun) {
       return;
@@ -368,6 +399,7 @@ const translateImage = async () => {
     setStatus(error.message || "Failed to translate image.", true);
   } finally {
     translationInFlight = false;
+    translationController = null;
   }
 };
 
@@ -395,15 +427,25 @@ els.fileInput.addEventListener("change", async (event) => {
   queueIndex = 0;
 
   try {
-    const dataUrl = await readAsDataUrl(file);
-    els.sourceImage.src = dataUrl;
+    cancelTranslation();
+    if (file.size > 15 * 1024 * 1024) {
+      throw new Error("Image must be 15 MB or smaller.");
+    }
+    const nextObjectUrl = URL.createObjectURL(file);
+    await loadImage(nextObjectUrl, file.size);
+    if (imageObjectUrl) {
+      URL.revokeObjectURL(imageObjectUrl);
+    }
+    imageObjectUrl = nextObjectUrl;
+    resultCache.clear();
+    els.sourceImage.src = nextObjectUrl;
     setStatus("Image loaded.");
-  } catch {
-    setStatus("Failed to read selected image.", true);
+  } catch (error) {
+    setStatus(error.message || "Failed to read selected image.", true);
   }
 });
 
-els.loadUrlBtn.addEventListener("click", () => {
+els.loadUrlBtn.addEventListener("click", async () => {
   const safeUrl = toSafeImageUrl(els.imageUrlInput.value.trim());
   if (!safeUrl) {
     setStatus("Provide a valid http/https image URL.", true);
@@ -412,9 +454,15 @@ els.loadUrlBtn.addEventListener("click", () => {
 
   stopAudio();
   queueIndex = 0;
-
-  els.sourceImage.src = safeUrl;
-  setStatus("Image URL loaded.");
+  cancelTranslation();
+  try {
+    await loadImage(safeUrl, 1);
+    resultCache.clear();
+    els.sourceImage.src = safeUrl;
+    setStatus("Image URL loaded.");
+  } catch (error) {
+    setStatus(error.message || "Image could not be loaded.", true);
+  }
 });
 
 els.overlayToggle.addEventListener("change", () => {
@@ -423,6 +471,26 @@ els.overlayToggle.addEventListener("change", () => {
 
 els.showOriginalToggle.addEventListener("change", () => {
   els.regionEditor.hidden = !els.showOriginalToggle.checked;
+});
+
+els.loginForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    const response = await fetch("/api/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: els.passwordInput.value })
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.error || "Sign-in failed.");
+    }
+    els.passwordInput.value = "";
+    els.loginForm.hidden = true;
+    setStatus("Signed in.");
+  } catch (error) {
+    setStatus(error.message, true);
+  }
 });
 
 els.translateBtn.addEventListener("click", () => {
@@ -479,4 +547,5 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
+checkSession().catch(() => setStatus("Unable to check authentication status.", true));
 setStatus("Ready. Load an image and click Translate now.");
