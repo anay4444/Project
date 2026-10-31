@@ -12,7 +12,7 @@ It is designed for reading comics, manga, or any foreign-language image content 
 - Floating controls (overlay, language, confidence, reading order, voice, speed)
 - Hotkeys for quick use while reading
 - Optional read-aloud pipeline through Kokoro TTS endpoint
-- Basic caching to avoid repeated OCR/translation for same image + settings
+- Bounded eight-entry LRU caching to avoid repeated OCR/translation for same image + settings
 
 ## Architecture
 
@@ -79,13 +79,14 @@ The server binds to `127.0.0.1` by default, which is the intended private/local 
 ## Reliability & Limits
 
 - OCR quality depends on image clarity/font/stylization.
-- Some sites block cross-origin image loads; upload file if URL load fails.
+- URL images are downloaded with a CORS-enabled browser request before display. The response is streamed and capped at 15 MB, then pixel dimensions are checked before OCR. Hosts that do not grant CORS cannot be safely size-checked by this browser app and are rejected; upload the image instead. The remote URL is still disclosed to its host.
 - Low-confidence text is visually marked.
 - If no text found or API fails, app keeps running and reports status.
 - API key should stay on backend only (never in frontend code).
 - Translation and TTS have separate rate limits, bounded request sizes, upstream timeouts, response-size limits, and generic upstream errors.
 - The browser groups OCR words into lines before translation, preserves selected LTR/RTL reading order, and exposes editable OCR and translation text.
 - Translation has both per-upstream-call and overall request deadlines. Invalid or oversized upstream responses return a bounded 502 response; timeouts return 504.
+- TTS follows the same distinction: invalid, non-success, or oversized upstream responses return 502; actual upstream timeouts return 504.
 - Browser uploads are limited to 15 MB, 10,000 pixels per dimension, and 40 million pixels. The result cache is an eight-entry LRU and stale OCR/translation work is cancelled or ignored.
 - Rate limits and concurrency counters are in-memory and per Node process. For multiple replicas, use a shared rate-limit store and enforce limits at the reverse proxy. Do not enable Express's `trust proxy` unless it is configured for the exact trusted proxy hops; otherwise client IPs must not be taken from forwarded headers.
 
@@ -95,7 +96,9 @@ The default setup keeps OCR in the browser and sends only grouped text to a self
 
 Google Cloud Translation can still be used by setting `TRANSLATION_PROVIDER=google`, `TRANSLATION_URL=https://translation.googleapis.com/language/translate/v2`, and `TRANSLATION_API_KEY` on the server. The server appends the key to the upstream request and never sends it to the browser. This option introduces billing, quota, and external data-flow/privacy considerations and is not the default. No translation engine is unlimited or cost-free: self-hosting shifts cost to hardware, electricity, model storage, and maintenance. Keep the service bound to localhost for private use. If deployed, set `TRANSLATOR_ACCESS_PASSWORD`, use HTTPS, and put the app behind a reverse proxy with network access controls.
 
-OCR remains local in the browser, which protects image pixels from the translation service but uses client CPU and memory. The pinned Tesseract.js CDN URL has a verified SRI hash and the CSP allows only the pinned CDN origin plus blob workers needed by Tesseract. For highest assurance, vendor the script and worker/model assets locally. Image URLs are loaded by the browser and may still reveal the URL to the image host; uploaded image pixels stay in the browser, while grouped OCR text is sent to the configured translation service.
+OCR remains local in the browser, which protects image pixels from the translation service but uses client CPU and memory. Tesseract's browser script, worker, and WASM core are served locally under `public/tesseract/`; language data is fetched only from the pinned `tessdata.projectnaptha.com` origin allowed by CSP. This keeps executable OCR assets local while avoiding a large repository copy of language models. Image URLs are loaded by the browser and may still reveal the URL to the image host; uploaded image pixels stay in the browser, while grouped OCR text is sent to the configured translation service.
+
+Sessions are intentionally stored only in the Node process memory. They are cleared whenever the process restarts and are not shared across multiple app instances. For deployment, use one instance behind HTTPS and a reverse proxy, or replace the in-memory session map with a shared, authenticated session store before running multiple replicas. Do not expose the app directly to the public internet with the default in-memory setup.
 
 ## Optional improvements
 

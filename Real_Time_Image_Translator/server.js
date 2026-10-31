@@ -152,7 +152,7 @@ const createApp = () => {
   const app = express();
   app.disable("x-powered-by");
   app.use((req, res, next) => {
-    res.setHeader("Content-Security-Policy", "default-src 'self'; img-src 'self' data: blob: https:; script-src 'self' https://cdn.jsdelivr.net; worker-src 'self' blob:; style-src 'self'; connect-src 'self' https://cdn.jsdelivr.net; object-src 'none'; base-uri 'self'; frame-ancestors 'none'");
+    res.setHeader("Content-Security-Policy", "default-src 'self'; img-src 'self' data: blob: https:; script-src 'self'; worker-src 'self' blob:; style-src 'self'; connect-src 'self' https://tessdata.projectnaptha.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'");
     res.setHeader("Referrer-Policy", "no-referrer");
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("X-Frame-Options", "DENY");
@@ -295,12 +295,23 @@ const createApp = () => {
       if (!upstream.ok) {
         return res.status(502).json({ error: "TTS service unavailable." });
       }
-      const audioBuffer = await readResponseWithLimit(upstream, MAX_AUDIO_BYTES);
+      let audioBuffer;
+      try {
+        audioBuffer = await readResponseWithLimit(upstream, MAX_AUDIO_BYTES);
+      } catch (error) {
+        if (error.message === "upstream_response_too_large") {
+          return res.status(502).json({ error: "TTS service returned an oversized response." });
+        }
+        throw error;
+      }
       res.setHeader("Content-Type", upstream.headers.get("content-type") || "audio/mpeg");
       res.setHeader("Content-Length", String(audioBuffer.byteLength));
       return res.send(audioBuffer);
-    } catch {
-      return res.status(504).json({ error: "TTS service timed out or returned an invalid response." });
+    } catch (error) {
+      if (error.name === "TimeoutError" || error.name === "AbortError") {
+        return res.status(504).json({ error: "TTS service timed out." });
+      }
+      return res.status(502).json({ error: "TTS service returned an invalid response." });
     }
   });
 

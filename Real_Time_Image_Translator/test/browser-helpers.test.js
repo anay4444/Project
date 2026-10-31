@@ -18,3 +18,12 @@ test("image validation rejects oversized files and dimensions", () => {
   assert.match(validateImageInfo({ size: 100, width: 10_001, height: 100 }), /dimensions/);
   assert.equal(validateImageInfo({ size: 100, width: 2_000, height: 2_000 }), null);
 });
+
+test("remote image response reader enforces declared and streamed byte limits", async () => {
+  await assert.rejects(
+    validateImageInfo.readResponseBlobWithLimit(new Response("x", { headers: { "content-length": String(16 * 1024 * 1024) } })),
+    /15 MB/
+  );
+  const response = new Response(new Uint8Array(16 * 1024 * 1024), { headers: { "content-type": "image/png" } });
+  await assert.rejects(validateImageInfo.readResponseBlobWithLimit(response), /15 MB/);
+});
