@@ -129,3 +129,26 @@ button {
   padding-top: 8px;
   font-size: 13px;
 }
+
+.region-editor {
+  border-top: 1px solid #2f2f2f;
+  padding-top: 8px;
+}
+
+.region-editor-item {
+  margin-bottom: 8px;
+}
+
+.region-editor-item label {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+  font-size: 12px;
+}
+
+.region-editor-item textarea {
+  width: 100%;
+  min-height: 42px;
+  box-sizing: border-box;
+  resize: vertical;
+}

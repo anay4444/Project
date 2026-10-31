@@ -5,6 +5,7 @@ const els = {
   sourceImage: document.getElementById("sourceImage"),
   overlayLayer: document.getElementById("overlayLayer"),
   overlayToggle: document.getElementById("overlayToggle"),
+  showOriginalToggle: document.getElementById("showOriginalToggle"),
   autoRefreshToggle: document.getElementById("autoRefreshToggle"),
   sourceLang: document.getElementById("sourceLang"),
   targetLang: document.getElementById("targetLang"),
@@ -18,13 +19,16 @@ const els = {
   pauseBtn: document.getElementById("pauseBtn"),
   stopBtn: document.getElementById("stopBtn"),
   nextBtn: document.getElementById("nextBtn"),
-  statusText: document.getElementById("statusText")
+  statusText: document.getElementById("statusText"),
+  regionEditor: document.getElementById("regionEditor")
 };
 
 let translatedRegions = [];
 let audioQueue = [];
 let currentAudio = null;
 let queueIndex = 0;
+let translationRun = 0;
+let translationInFlight = false;
 
 const resultCache = new Map();
 const imageObserver = new MutationObserver(() => {
@@ -112,10 +116,33 @@ const renderOverlay = (regions) => {
     box.style.width = `${width}px`;
     box.style.height = `${height}px`;
     box.style.fontSize = `${fontSize}px`;
-    box.textContent = region.translatedText;
+    box.textContent = region.translatedText || region.sourceText;
 
     els.overlayLayer.appendChild(box);
   }
+};
+
+const renderRegionEditor = (regions) => {
+  els.regionEditor.innerHTML = "";
+  regions.forEach((region, index) => {
+    const item = document.createElement("details");
+    item.className = "region-editor-item";
+    item.open = true;
+    const summary = document.createElement("summary");
+    summary.textContent = `Region ${index + 1}`;
+    item.appendChild(summary);
+    for (const [field, labelText] of [["sourceText", "Original OCR"], ["translatedText", "Translation"]]) {
+      const label = document.createElement("label");
+      label.textContent = labelText;
+      const textarea = document.createElement("textarea");
+      textarea.dataset.region = String(index);
+      textarea.dataset.field = field;
+      textarea.value = region[field];
+      label.appendChild(textarea);
+      item.appendChild(label);
+    }
+    els.regionEditor.appendChild(item);
+  });
 };
 
 const normalizeWordsToRegions = (words, minConfidence) =>
@@ -135,6 +162,39 @@ const normalizeWordsToRegions = (words, minConfidence) =>
       },
       translatedText: ""
     }));
+
+const groupWordsIntoLines = (words, order) => {
+  const lines = [];
+  for (const word of [...words].sort((a, b) => a.bbox.y0 - b.bbox.y0 || a.bbox.x0 - b.bbox.x0)) {
+    const centerY = (word.bbox.y0 + word.bbox.y1) / 2;
+    const line = lines.find((candidate) => {
+      const overlap = Math.min(candidate.y1, word.bbox.y1) - Math.max(candidate.y0, word.bbox.y0);
+      return overlap > 0 && Math.abs(candidate.centerY - centerY) < Math.max(12, (word.bbox.y1 - word.bbox.y0) * 0.8);
+    });
+    if (line) {
+      line.words.push(word);
+      line.y0 = Math.min(line.y0, word.bbox.y0);
+      line.y1 = Math.max(line.y1, word.bbox.y1);
+      line.centerY = (line.y0 + line.y1) / 2;
+    } else {
+      lines.push({ words: [word], y0: word.bbox.y0, y1: word.bbox.y1, centerY });
+    }
+  }
+  return lines.map((line) => {
+    const ordered = line.words.sort((a, b) => order === "rtl" ? b.bbox.x0 - a.bbox.x0 : a.bbox.x0 - b.bbox.x0);
+    return {
+      sourceText: ordered.map((word) => word.sourceText).join(" "),
+      confidence: Math.min(...ordered.map((word) => word.confidence)),
+      bbox: {
+        x0: Math.min(...ordered.map((word) => word.bbox.x0)),
+        y0: Math.min(...ordered.map((word) => word.bbox.y0)),
+        x1: Math.max(...ordered.map((word) => word.bbox.x1)),
+        y1: Math.max(...ordered.map((word) => word.bbox.y1))
+      },
+      translatedText: ""
+    };
+  });
+};
 
 const performTranslation = async (texts, source, target) => {
   const response = await fetch("/api/translate", {
@@ -240,27 +300,35 @@ const translateImage = async () => {
     setStatus("Load an image first.", true);
     return;
   }
+  if (translationInFlight) {
+    setStatus("A translation is already running.");
+    return;
+  }
+  translationInFlight = true;
 
   const cacheKey = getImageCacheKey();
   if (resultCache.has(cacheKey)) {
     translatedRegions = resultCache.get(cacheKey);
     renderOverlay(translatedRegions);
+    renderRegionEditor(translatedRegions);
     audioQueue = buildAudioQueue(translatedRegions);
     setStatus(`Loaded ${translatedRegions.length} region(s) from cache.`);
     if (els.autoPlayToggle.checked) {
       queueIndex = 0;
       playQueueFromCurrent().catch((error) => setStatus(error.message, true));
     }
+    translationInFlight = false;
     return;
   }
 
+  const run = ++translationRun;
   try {
     const minConfidence = Number(els.minConfidence.value) || 0;
     const sourceLanguage = els.sourceLang.value.trim() || "auto";
     const targetLanguage = els.targetLang.value.trim() || "en";
 
     const words = await performOcr();
-    const regions = normalizeWordsToRegions(words, minConfidence);
+    const regions = groupWordsIntoLines(normalizeWordsToRegions(words, minConfidence), els.readingOrder.value);
     if (!regions.length) {
       translatedRegions = [];
       renderOverlay(translatedRegions);
@@ -276,6 +344,9 @@ const translateImage = async () => {
       sourceLanguage,
       targetLanguage
     );
+    if (run !== translationRun) {
+      return;
+    }
 
     translatedRegions = orderedRegions.map((region, index) => ({
       ...region,
@@ -284,6 +355,7 @@ const translateImage = async () => {
 
     resultCache.set(cacheKey, translatedRegions);
     renderOverlay(translatedRegions);
+    renderRegionEditor(translatedRegions);
     audioQueue = buildAudioQueue(translatedRegions);
 
     setStatus(`Done. Rendered ${translatedRegions.length} translated region(s).`);
@@ -294,8 +366,24 @@ const translateImage = async () => {
     }
   } catch (error) {
     setStatus(error.message || "Failed to translate image.", true);
+  } finally {
+    translationInFlight = false;
   }
 };
+
+els.regionEditor.addEventListener("input", (event) => {
+  const field = event.target.dataset.field;
+  const index = Number(event.target.dataset.region);
+  if (!field || !Number.isInteger(index) || !translatedRegions[index]) {
+    return;
+  }
+  translatedRegions[index][field] = event.target.value;
+  if (field === "sourceText") {
+    resultCache.clear();
+  }
+  renderOverlay(translatedRegions);
+  audioQueue = buildAudioQueue(translatedRegions);
+});
 
 els.fileInput.addEventListener("change", async (event) => {
   const file = event.target.files?.[0];
@@ -331,6 +419,10 @@ els.loadUrlBtn.addEventListener("click", () => {
 
 els.overlayToggle.addEventListener("change", () => {
   renderOverlay(translatedRegions);
+});
+
+els.showOriginalToggle.addEventListener("change", () => {
+  els.regionEditor.hidden = !els.showOriginalToggle.checked;
 });
 
 els.translateBtn.addEventListener("click", () => {

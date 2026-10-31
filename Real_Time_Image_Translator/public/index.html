@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Real-Time Image Translator</title>
     <link rel="stylesheet" href="styles.css" />
-    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js" defer></script>
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js" defer></script>
     <script src="app.js" defer></script>
   </head>
   <body>
@@ -36,6 +36,7 @@
     <aside class="floating-controls" id="controls">
       <h2>Controls</h2>
       <label><input id="overlayToggle" type="checkbox" checked /> Show overlay</label>
+      <label><input id="showOriginalToggle" type="checkbox" checked /> Show original text</label>
       <label><input id="autoRefreshToggle" type="checkbox" checked /> Auto-refresh on changes</label>
       <label>
         Source language
@@ -72,6 +73,7 @@
         <button id="stopBtn" type="button">Stop</button>
         <button id="nextBtn" type="button">Next</button>
       </div>
+      <section id="regionEditor" class="region-editor" aria-live="polite"></section>
       <p class="hint">Hotkeys: Ctrl+Shift+T overlay, Ctrl+Shift+R translate, Ctrl+Shift+P play/pause.</p>
       <p id="statusText">Status: Ready</p>
     </aside>
