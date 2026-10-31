@@ -9,6 +9,14 @@ const els = {
   autoRefreshToggle: document.getElementById("autoRefreshToggle"),
   sourceLang: document.getElementById("sourceLang"),
   targetLang: document.getElementById("targetLang"),
+  providerSelect: document.getElementById("providerSelect"),
+  cloudProviderControls: document.getElementById("cloudProviderControls"),
+  geminiKeyInput: document.getElementById("geminiKeyInput"),
+  connectGeminiBtn: document.getElementById("connectGeminiBtn"),
+  disconnectProviderBtn: document.getElementById("disconnectProviderBtn"),
+  providerStatus: document.getElementById("providerStatus"),
+  contextWindow: document.getElementById("contextWindow"),
+  glossaryInput: document.getElementById("glossaryInput"),
   minConfidence: document.getElementById("minConfidence"),
   readingOrder: document.getElementById("readingOrder"),
   voiceInput: document.getElementById("voiceInput"),
@@ -281,13 +289,19 @@ const groupWordsIntoLines = (words, order) => {
 };
 
 const performTranslation = async (texts, source, target, signal) => {
+  const provider = els.providerSelect.value;
+  const contextWindow = Math.max(0, Math.min(5, Number(els.contextWindow.value) || 0));
   const response = await fetch("/api/translate", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       texts,
+      segments: texts.map((text, index) => ({ id: String(index), text })),
       source: source === "auto" ? undefined : source,
-      target
+      target,
+      provider,
+      contextWindow,
+      glossary: els.glossaryInput.value.slice(0, 5_000)
     }),
     signal
   });
@@ -298,6 +312,44 @@ const performTranslation = async (texts, source, target, signal) => {
   }
 
   return Array.isArray(payload.translated) ? payload.translated.map((text) => htmlDecode(text)) : [];
+};
+
+const refreshProviderStatus = async () => {
+  const response = await fetch("/api/provider");
+  if (!response.ok) return;
+  const payload = await response.json();
+  els.providerSelect.value = payload.provider || "local";
+  els.cloudProviderControls.hidden = els.providerSelect.value !== "gemini";
+  els.providerStatus.textContent = payload.connected
+    ? `Connected to Gemini (${payload.model}). Quota and billing are controlled by your account.`
+    : "Not connected.";
+};
+
+const connectGemini = async () => {
+  const apiKey = els.geminiKeyInput.value.trim();
+  if (!apiKey) {
+    setStatus("Enter a Gemini API key to connect.", true);
+    return;
+  }
+  const response = await fetch("/api/provider/connect", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider: "gemini", apiKey })
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || "Gemini connection failed.");
+  els.geminiKeyInput.value = "";
+  els.providerSelect.value = "gemini";
+  await refreshProviderStatus();
+  setStatus("Gemini connected for this server session.");
+};
+
+const disconnectProvider = async () => {
+  const response = await fetch("/api/provider/disconnect", { method: "POST" });
+  if (!response.ok) throw new Error("Could not disconnect the cloud provider.");
+  els.providerSelect.value = "local";
+  await refreshProviderStatus();
+  setStatus("Returned to local translation.");
 };
 
 const performOcr = async () => {
@@ -746,28 +798,7 @@ els.loginForm.addEventListener("submit", async (event) => {
       body: JSON.stringify({ password: els.passwordInput.value })
     });
 
-    els.documentInput.addEventListener("change", async (event) => {
-      const file = event.target.files?.[0];
-      if (!file) return;
-      try {
-        documentController?.abort();
-        documentState = await importTextDocument(file);
-        updateDocumentButtons(true, false);
-        setStatus(`Loaded ${file.name}. Translate it before exporting.`);
-      } catch (error) {
-        documentState = null;
-        updateDocumentButtons(false, false);
-        setStatus(error.message || "Document import failed.", true);
-      }
-    });
-
-    els.translateDocumentBtn.addEventListener("click", () => translateDocument());
-    els.exportTxtBtn.addEventListener("click", () => exportDocument("txt"));
-    els.exportXlsxBtn.addEventListener("click", () => exportDocument("xlsx"));
-    els.exportDocxBtn.addEventListener("click", () => exportDocument("docx"));
-    els.exportImageTxtBtn.addEventListener("click", () => exportImage("txt"));
-    els.exportImageXlsxBtn.addEventListener("click", () => exportImage("xlsx"));
-    els.exportImageDocxBtn.addEventListener("click", () => exportImage("docx"));
+    await refreshProviderStatus();
     const payload = await response.json();
     if (!response.ok) {
       throw new Error(payload.error || "Sign-in failed.");
@@ -779,6 +810,38 @@ els.loginForm.addEventListener("submit", async (event) => {
     setStatus(error.message, true);
   }
 });
+
+els.providerSelect.addEventListener("change", () => {
+  els.cloudProviderControls.hidden = els.providerSelect.value !== "gemini";
+  if (els.providerSelect.value === "gemini") {
+    setStatus("Connect Gemini before translating. Cloud mode is opt-in and may incur account charges.");
+  }
+});
+els.connectGeminiBtn.addEventListener("click", () => connectGemini().catch((error) => setStatus(error.message, true)));
+els.disconnectProviderBtn.addEventListener("click", () => disconnectProvider().catch((error) => setStatus(error.message, true)));
+els.documentInput.addEventListener("change", async (event) => {
+  const file = event.target.files?.[0];
+  if (!file) return;
+  try {
+    documentController?.abort();
+    documentState = await importTextDocument(file);
+    updateDocumentButtons(true, false);
+    setStatus(`Loaded ${file.name}. Translate it before exporting.`);
+  } catch (error) {
+    documentState = null;
+    updateDocumentButtons(false, false);
+    setStatus(error.message || "Document import failed.", true);
+  }
+});
+els.translateDocumentBtn.addEventListener("click", () => translateDocument());
+els.exportTxtBtn.addEventListener("click", () => exportDocument("txt"));
+els.exportXlsxBtn.addEventListener("click", () => exportDocument("xlsx"));
+els.exportDocxBtn.addEventListener("click", () => exportDocument("docx"));
+els.exportImageTxtBtn.addEventListener("click", () => exportImage("txt"));
+els.exportImageXlsxBtn.addEventListener("click", () => exportImage("xlsx"));
+els.exportImageDocxBtn.addEventListener("click", () => exportImage("docx"));
+
+refreshProviderStatus().catch(() => {});
 
 els.translateBtn.addEventListener("click", () => {
   translateImage().catch((error) => setStatus(error.message, true));

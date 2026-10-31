@@ -215,3 +215,66 @@ serialTest("returns 504 when the overall translation deadline aborts work", asyn
   const result = await request(server, "/api/translate", { texts: ["hello"] });
   assert.equal(result.status, 504);
 });
+
+serialTest("connects Gemini for one in-memory session and maps structured context", async (t) => {
+  const originalFetch = global.fetch;
+  const previousProvider = process.env.TRANSLATION_PROVIDER;
+  let captured;
+  global.fetch = async (url, options) => {
+    captured = { url: String(url), headers: options.headers, body: JSON.parse(options.body) };
+    return new Response(JSON.stringify({
+      candidates: [{ content: { parts: [{ text: JSON.stringify({ translations: [
+        { id: "0", text: "Wait!" },
+        { id: "1", text: "Here." }
+      ] }) }] } }]
+    }), { status: 200 });
+  };
+  process.env.TRANSLATION_PROVIDER = "libretranslate";
+  const server = createApp().listen(0);
+  t.after(() => {
+    server.close();
+    global.fetch = originalFetch;
+    if (previousProvider === undefined) delete process.env.TRANSLATION_PROVIDER;
+    else process.env.TRANSLATION_PROVIDER = previousProvider;
+  });
+
+  const key = "AIza" + "a".repeat(36);
+  const connected = await request(server, "/api/provider/connect", { provider: "gemini", apiKey: key });
+  assert.equal(connected.status, 200);
+  assert.doesNotMatch(connected.body.toString(), new RegExp(key));
+  const cookie = connected.headers["set-cookie"][0];
+  const result = await request(server, "/api/translate", {
+    provider: "gemini",
+    source: "ja",
+    target: "en",
+    texts: ["先輩、待って!", "ここです。"],
+    segments: [{ id: "0", text: "先輩、待って!" }, { id: "1", text: "ここです。" }],
+    glossary: "先輩: senpai",
+    contextWindow: 1
+  }, { cookie });
+  assert.equal(result.status, 200);
+  assert.deepEqual(JSON.parse(result.body).translated, ["Wait!", "Here."]);
+  assert.match(captured.url, /generativelanguage\.googleapis\.com/);
+  assert.match(captured.body.contents[0].parts[0].text, /senpai/);
+  assert.equal(captured.headers["x-goog-api-key"], key);
+  assert.doesNotMatch(captured.url, /AIza/);
+});
+
+serialTest("rejects malformed cloud segments and exposes quota status", async (t) => {
+  const originalFetch = global.fetch;
+  global.fetch = async () => new Response("quota", { status: 429 });
+  const server = createApp().listen(0);
+  t.after(() => {
+    server.close();
+    global.fetch = originalFetch;
+  });
+  const connected = await request(server, "/api/provider/connect", { provider: "gemini", apiKey: "AIza" + "b".repeat(36) });
+  const cookie = connected.headers["set-cookie"][0];
+  assert.equal((await request(server, "/api/translate", {
+    provider: "gemini", texts: ["hello"], segments: [{ id: "1", text: "hello" }]
+  }, { cookie })).status, 400);
+  const quota = await request(server, "/api/translate", {
+    provider: "gemini", texts: ["hello"], segments: [{ id: "0", text: "hello" }]
+  }, { cookie });
+  assert.equal(quota.status, 429);
+});

@@ -3,6 +3,13 @@ const dotenv = require("dotenv");
 const rateLimit = require("express-rate-limit");
 const crypto = require("node:crypto");
 const { LANGUAGES, isAllowedLanguage, getProviderLanguage } = require("./language-config");
+const {
+  GEMINI_PROVIDER,
+  GEMINI_DEFAULT_MODEL,
+  isValidGeminiKey,
+  buildGeminiPrompt,
+  parseGeminiResponse
+} = require("./translation-providers");
 
 dotenv.config();
 
@@ -14,7 +21,7 @@ const MAX_AUDIO_BYTES = 8 * 1024 * 1024;
 const MAX_TRANSLATION_DURATION_MS = 30_000;
 const MAX_TRANSLATION_CALL_MS = 15_000;
 const VOICE_NAME = /^[a-zA-Z0-9_.-]{1,80}$/;
-const TRANSLATION_PROVIDERS = new Set(["libretranslate", "google"]);
+const TRANSLATION_PROVIDERS = new Set(["libretranslate", "google", GEMINI_PROVIDER]);
 const sessions = new Map();
 
 const createLimiter = (limit) =>
@@ -51,7 +58,8 @@ const isAuthorized = (req) => {
     return true;
   }
   const token = req.cookies?.translator_session;
-  return typeof token === "string" && sessions.has(token);
+  const session = typeof token === "string" ? sessions.get(token) : null;
+  return Boolean(session && session.expiresAt > Date.now());
 };
 
 const requireAuthorization = (req, res, next) => {
@@ -63,17 +71,27 @@ const requireAuthorization = (req, res, next) => {
 
 const createSession = () => {
   const token = crypto.randomBytes(32).toString("base64url");
-  sessions.set(token, Date.now() + 8 * 60 * 60 * 1000);
+  sessions.set(token, { expiresAt: Date.now() + 8 * 60 * 60 * 1000, cloud: null });
   return token;
 };
 
 const expireSessions = () => {
   const now = Date.now();
-  for (const [token, expiresAt] of sessions) {
-    if (expiresAt <= now) {
+  for (const [token, session] of sessions) {
+    if (session.expiresAt <= now) {
       sessions.delete(token);
     }
   }
+};
+
+const getSession = (req) => {
+  const token = req.cookies?.translator_session;
+  const session = typeof token === "string" ? sessions.get(token) : null;
+  return session && session.expiresAt > Date.now() ? session : null;
+};
+
+const setSessionCookie = (res, token) => {
+  res.setHeader("Set-Cookie", `translator_session=${encodeURIComponent(token)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800${process.env.NODE_ENV === "production" ? "; Secure" : ""}`);
 };
 
 class UpstreamError extends Error {
@@ -188,7 +206,7 @@ const createApp = () => {
       return res.status(401).json({ error: "Invalid credentials." });
     }
     const token = createSession();
-    res.setHeader("Set-Cookie", `translator_session=${encodeURIComponent(token)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800${process.env.NODE_ENV === "production" ? "; Secure" : ""}`);
+    setSessionCookie(res, token);
     return res.json({ authenticated: true });
   });
 
@@ -201,8 +219,42 @@ const createApp = () => {
     return res.json({ authenticated: false });
   });
 
+  app.get("/api/provider", requireAuthorization, (req, res) => {
+    const session = getSession(req);
+    const cloud = session?.cloud;
+    return res.json({
+      provider: cloud?.provider || "local",
+      connected: Boolean(cloud?.apiKey),
+      model: cloud?.model || GEMINI_DEFAULT_MODEL,
+      quota: "Provider quota and billing are controlled by your Gemini account."
+    });
+  });
+
+  app.post("/api/provider/connect", requireAuthorization, createLimiter(6), (req, res) => {
+    const provider = req.body?.provider;
+    const apiKey = typeof req.body?.apiKey === "string" ? req.body.apiKey.trim() : "";
+    if (provider !== GEMINI_PROVIDER || !isValidGeminiKey(apiKey)) {
+      return res.status(400).json({ error: "Provide a valid Gemini API key." });
+    }
+    let token = req.cookies?.translator_session;
+    let session = getSession(req);
+    if (!session) {
+      token = createSession();
+      session = sessions.get(token);
+      setSessionCookie(res, token);
+    }
+    session.cloud = { provider: GEMINI_PROVIDER, apiKey, model: process.env.GEMINI_MODEL || GEMINI_DEFAULT_MODEL };
+    return res.json({ provider: GEMINI_PROVIDER, connected: true, model: session.cloud.model });
+  });
+
+  app.post("/api/provider/disconnect", requireAuthorization, (req, res) => {
+    const session = getSession(req);
+    if (session) session.cloud = null;
+    return res.json({ provider: "local", connected: false });
+  });
+
   app.post("/api/translate", requireAuthorization, createLimiter(30), createConcurrencyLimit(4), async (req, res) => {
-    const { texts, target = "en", source = "auto" } = req.body || {};
+    const { texts, segments, target = "en", source = "auto", provider = "local", glossary = "", contextWindow = 2 } = req.body || {};
     const totalLength = Array.isArray(texts) ? texts.reduce((sum, text) => sum + (typeof text === "string" ? text.length : 0), 0) : 0;
     if (!Array.isArray(texts) || texts.length === 0 || texts.length > MAX_TEXTS || texts.some((text) => typeof text !== "string" || !text.trim() || text.length > MAX_TEXT_LENGTH) || totalLength > MAX_TOTAL_TEXT_LENGTH) {
       return res.status(400).json({ error: "texts must contain up to 60 non-empty strings within the size limits." });
@@ -210,13 +262,21 @@ const createApp = () => {
     if (!isAllowedLanguage(target) || !isAllowedLanguage(source, true)) {
       return res.status(400).json({ error: "Invalid source or target language code." });
     }
+    if (!["local", GEMINI_PROVIDER].includes(provider) || !Number.isInteger(contextWindow) || contextWindow < 0 || contextWindow > 5 || typeof glossary !== "string" || glossary.length > 5_000) {
+      return res.status(400).json({ error: "Invalid provider, glossary, or context settings." });
+    }
+    if (segments !== undefined && (!Array.isArray(segments) || segments.length !== texts.length || segments.some((segment, index) => !segment || String(segment.id) !== String(index) || typeof segment.text !== "string" || segment.text !== texts[index]))) {
+      return res.status(400).json({ error: "Segments must match the submitted text items." });
+    }
     const providerTarget = getProviderLanguage(target);
     const providerSource = source === "auto" ? null : getProviderLanguage(source);
 
-    const provider = process.env.TRANSLATION_PROVIDER || "libretranslate";
+    const selectedProvider = provider === GEMINI_PROVIDER ? GEMINI_PROVIDER : process.env.TRANSLATION_PROVIDER || "libretranslate";
     const translationUrl = process.env.TRANSLATION_URL;
     const apiKey = process.env.TRANSLATION_API_KEY;
-    if (!TRANSLATION_PROVIDERS.has(provider) || !translationUrl || (provider === "google" && !apiKey)) {
+    const cloudSession = getSession(req)?.cloud;
+    const geminiKey = cloudSession?.provider === GEMINI_PROVIDER ? cloudSession.apiKey : null;
+    if (!TRANSLATION_PROVIDERS.has(selectedProvider) || (selectedProvider !== GEMINI_PROVIDER && !translationUrl) || (selectedProvider === "google" && !apiKey) || (provider === GEMINI_PROVIDER && !geminiKey)) {
       return res.status(503).json({ error: "Translation service is not configured." });
     }
 
@@ -224,11 +284,11 @@ const createApp = () => {
     const deadlineSignal = AbortSignal.timeout(Math.max(1_000, Math.min(deadlineMs, MAX_TRANSLATION_DURATION_MS)));
     try {
       const requestTranslation = async (q) => {
-        const body = provider === "google"
+        const body = selectedProvider === "google"
           ? { q, target: providerTarget, ...(providerSource ? { source: providerSource } : {}) }
           : { q, target: providerTarget, ...(providerSource ? { source: providerSource } : {}), ...(apiKey ? { api_key: apiKey } : {}) };
         const upstreamUrl = new URL(translationUrl);
-        if (provider === "google") {
+        if (selectedProvider === "google") {
           upstreamUrl.searchParams.set("key", apiKey);
         }
         const response = await fetchWithTimeout(upstreamUrl, {
@@ -237,6 +297,7 @@ const createApp = () => {
           body: JSON.stringify(body)
         }, MAX_TRANSLATION_CALL_MS, deadlineSignal);
         if (!response.ok) {
+          if (response.status === 429) throw new UpstreamError(429, "translation_quota_exceeded");
           throw new UpstreamError(502, "translation_upstream_error");
         }
         let payload;
@@ -245,13 +306,43 @@ const createApp = () => {
         } catch {
           throw new UpstreamError(502, "translation_invalid_response");
         }
-        return provider === "google"
+        return selectedProvider === "google"
           ? payload?.data?.translations?.map((item) => item.translatedText || "")
           : payload?.translatedText
             ? [payload.translatedText]
             : payload?.translations?.map((item) => item.translatedText || item.text || "");
       };
-      const batches = provider === "google" ? [texts] : texts.map((text) => [text]);
+      if (selectedProvider === GEMINI_PROVIDER) {
+        const session = getSession(req);
+        const inputSegments = (segments || texts.map((text, index) => ({ id: String(index), text }))).map((segment) => ({ id: String(segment.id), text: segment.text }));
+        const upstreamUrl = new URL(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(session.cloud.model)}:generateContent`);
+        const response = await fetchWithTimeout(upstreamUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-goog-api-key": geminiKey },
+          body: JSON.stringify({
+            contents: [{ role: "user", parts: [{ text: buildGeminiPrompt({ segments: inputSegments, source, target, glossary, contextWindow }) }] }],
+            generationConfig: { responseMimeType: "application/json", temperature: 0.2 }
+          })
+        }, MAX_TRANSLATION_CALL_MS, deadlineSignal);
+        if (!response.ok) {
+          if (response.status === 429) throw new UpstreamError(429, "translation_quota_exceeded");
+          throw new UpstreamError(502, "translation_upstream_error");
+        }
+        let payload;
+        try {
+          payload = JSON.parse((await readResponseWithLimit(response, 512 * 1024)).toString("utf8"));
+        } catch {
+          throw new UpstreamError(502, "translation_invalid_response");
+        }
+        let mapped;
+        try {
+          mapped = parseGeminiResponse(payload, inputSegments.map((segment) => segment.id));
+        } catch {
+          throw new UpstreamError(502, "translation_invalid_response");
+        }
+        return res.json({ translated: inputSegments.map((segment) => mapped.find((item) => item.id === segment.id).text), provider: GEMINI_PROVIDER, model: session.cloud.model });
+      }
+      const batches = selectedProvider === "google" ? [texts] : texts.map((text) => [text]);
       const translated = [];
       for (let index = 0; index < batches.length; index += 4) {
         translated.push(...(await Promise.all(batches.slice(index, index + 4).map(requestTranslation))).flat());
@@ -262,7 +353,7 @@ const createApp = () => {
       return res.json({ translated });
     } catch (error) {
       if (error instanceof UpstreamError) {
-        return res.status(error.status).json({ error: "Translation service returned an invalid response." });
+        return res.status(error.status).json({ error: error.status === 429 ? "Cloud translation quota exceeded." : "Translation service returned an invalid response." });
       }
       if (error.name === "TimeoutError" || error.name === "AbortError") {
         return res.status(504).json({ error: "Translation service timed out." });

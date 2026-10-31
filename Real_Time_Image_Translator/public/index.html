@@ -52,6 +52,30 @@
         <select id="targetLang"></select>
       </label>
       <label>
+        Translation provider
+        <select id="providerSelect">
+          <option value="local">Local LibreTranslate-compatible service</option>
+          <option value="gemini">Gemini cloud (your API key)</option>
+        </select>
+      </label>
+      <div id="cloudProviderControls" hidden>
+        <p class="hint">Cloud mode sends extracted text, nearby segment context, and your glossary to Gemini. Image pixels and document archives stay in this browser. Gemini account terms, quotas, and charges apply.</p>
+        <label>Gemini API key (kept in this server session only)<input id="geminiKeyInput" type="password" autocomplete="off" /></label>
+        <div class="buttons">
+          <button id="connectGeminiBtn" type="button">Connect Gemini</button>
+          <button id="disconnectProviderBtn" type="button">Disconnect</button>
+        </div>
+        <p id="providerStatus" class="hint">Not connected.</p>
+      </div>
+      <label>
+        Context window (nearby segments)
+        <input id="contextWindow" type="number" min="0" max="5" value="2" />
+      </label>
+      <label>
+        Glossary (one preferred term per line, e.g. <code>君: you</code>)
+        <textarea id="glossaryInput" rows="3" maxlength="5000"></textarea>
+      </label>
+      <label>
         Min confidence (0-100)
         <input id="minConfidence" type="number" min="0" max="100" value="55" />
       </label>
