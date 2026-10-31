@@ -16,6 +16,14 @@ const els = {
   autoPlayToggle: document.getElementById("autoPlayToggle"),
   loginForm: document.getElementById("loginForm"),
   passwordInput: document.getElementById("passwordInput"),
+  documentInput: document.getElementById("documentInput"),
+  translateDocumentBtn: document.getElementById("translateDocumentBtn"),
+  exportTxtBtn: document.getElementById("exportTxtBtn"),
+  exportXlsxBtn: document.getElementById("exportXlsxBtn"),
+  exportDocxBtn: document.getElementById("exportDocxBtn"),
+  exportImageTxtBtn: document.getElementById("exportImageTxtBtn"),
+  exportImageXlsxBtn: document.getElementById("exportImageXlsxBtn"),
+  exportImageDocxBtn: document.getElementById("exportImageDocxBtn"),
   translateBtn: document.getElementById("translateBtn"),
   playBtn: document.getElementById("playBtn"),
   pauseBtn: document.getElementById("pauseBtn"),
@@ -35,6 +43,25 @@ let translationController = null;
 let imageObjectUrl = null;
 
 const resultCache = createLruCache(8);
+const MAX_FILE_BYTES = 15 * 1024 * 1024;
+const MAX_TEXTS = 60;
+const MAX_DOCUMENT_TEXT = 100_000;
+const MAX_DOCUMENT_CELLS = 5_000;
+const MAX_ARCHIVE_BYTES = 80 * 1024 * 1024;
+let documentState = null;
+let documentController = null;
+
+const languageCodes = Object.keys(LANGUAGES).filter((code) => code !== "zh-TW");
+const languageOptions = (select, includeAuto) => {
+  if (includeAuto) {
+    select.append(new Option("Auto-detect (seven languages only)", "auto"));
+  }
+  languageCodes.forEach((code) => select.append(new Option(LANGUAGES[code].label, code)));
+};
+languageOptions(els.sourceLang, true);
+languageOptions(els.targetLang, false);
+els.sourceLang.value = "auto";
+els.targetLang.value = "en";
 const imageObserver = new MutationObserver(() => {
   if (els.autoRefreshToggle.checked && els.sourceImage.src) {
     setTimeout(() => {
@@ -275,13 +302,190 @@ const performTranslation = async (texts, source, target, signal) => {
 
 const performOcr = async () => {
   setStatus("Running OCR...");
-  const result = await window.Tesseract.recognize(els.sourceImage, "jpn+eng", {
+  const result = await window.Tesseract.recognize(els.sourceImage, getOcrLanguage(els.sourceLang.value), {
     logger: () => {},
     workerPath: "/tesseract/worker.min.js",
     corePath: "/tesseract/tesseract-core.wasm.js",
     langPath: "https://tessdata.projectnaptha.com/4.0.0"
   });
   return result?.data?.words || [];
+};
+
+const translateTexts = async (texts, signal) => {
+  if (texts.length > MAX_TEXTS) {
+    const output = [];
+    for (let index = 0; index < texts.length; index += MAX_TEXTS) {
+      output.push(...await performTranslation(texts.slice(index, index + MAX_TEXTS), els.sourceLang.value, els.targetLang.value, signal));
+    }
+    return output;
+  }
+  return performTranslation(texts, els.sourceLang.value, els.targetLang.value, signal);
+};
+
+const downloadBlob = (blob, filename) => {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+};
+
+const xmlEscape = (value) => String(value).replace(/[<>&'"]/g, (char) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", "'": "&apos;", "\"": "&quot;" }[char]));
+const makeDocx = async (paragraphs) => {
+  const zip = new JSZip();
+  zip.file("[Content_Types].xml", `<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>`);
+  zip.file("_rels/.rels", `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`);
+  zip.file("word/document.xml", `<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${paragraphs.map((text) => `<w:p><w:r><w:t xml:space="preserve">${xmlEscape(text)}</w:t></w:r></w:p>`).join("")}</w:body></w:document>`);
+  return zip.generateAsync({ type: "blob", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" });
+};
+
+const updateDocumentButtons = (imported, translated = false) => {
+  els.translateDocumentBtn.disabled = !imported;
+  [els.exportTxtBtn, els.exportXlsxBtn, els.exportDocxBtn].forEach((button) => {
+    button.disabled = !translated;
+  });
+};
+
+const updateImageExportButtons = (enabled) => {
+  [els.exportImageTxtBtn, els.exportImageXlsxBtn, els.exportImageDocxBtn].forEach((button) => {
+    button.disabled = !enabled;
+  });
+};
+
+const archiveWithinLimit = async (arrayBuffer) => {
+  const zip = await JSZip.loadAsync(arrayBuffer);
+  let total = 0;
+  for (const entry of Object.values(zip.files)) {
+    total += entry._data?.uncompressedSize || 0;
+    if (total > MAX_ARCHIVE_BYTES) {
+      throw new Error("Document expands beyond the safety limit.");
+    }
+  }
+};
+
+const extractDocxParagraphs = (xml) => {
+  const doc = new DOMParser().parseFromString(xml, "application/xml");
+  if (doc.querySelector("parsererror")) throw new Error("The DOCX document is malformed.");
+  return [...doc.getElementsByTagNameNS("http://schemas.openxmlformats.org/wordprocessingml/2006/main", "p")].map((paragraph) =>
+    [...paragraph.getElementsByTagNameNS("http://schemas.openxmlformats.org/wordprocessingml/2006/main", "t")]
+      .map((text) => text.textContent)
+      .join("")
+  );
+};
+
+const importTextDocument = async (file) => {
+  if (file.size > MAX_FILE_BYTES) throw new Error("Document must be 15 MB or smaller.");
+  if (file.name.toLowerCase().endsWith(".txt")) {
+    const text = await file.text();
+    if (text.length > MAX_DOCUMENT_TEXT) throw new Error("Document text is too long.");
+    return { kind: "txt", name: file.name, paragraphs: text.split(/\r?\n/), original: text };
+  }
+  const buffer = await file.arrayBuffer();
+  await archiveWithinLimit(buffer);
+  if (file.name.toLowerCase().endsWith(".xlsx")) {
+    const workbook = XLSX.read(buffer, { type: "array", cellFormula: true });
+    const cells = [];
+    workbook.SheetNames.forEach((sheetName) => {
+      const sheet = workbook.Sheets[sheetName];
+      Object.keys(sheet).filter((key) => !key.startsWith("!")).forEach((address) => {
+        const cell = sheet[address];
+        if (cell && typeof cell.v === "string" && !cell.f && cell.v.trim()) cells.push({ sheetName, address, text: cell.v });
+      });
+    });
+    if (cells.length > MAX_DOCUMENT_CELLS) throw new Error("Workbook has too many text cells.");
+    return { kind: "xlsx", name: file.name, workbook, cells };
+  }
+  if (file.name.toLowerCase().endsWith(".docx")) {
+    const zip = await JSZip.loadAsync(buffer);
+    const xml = await zip.file("word/document.xml")?.async("text");
+    if (!xml) throw new Error("The DOCX document is missing its main document.");
+    const paragraphs = extractDocxParagraphs(xml);
+    if (paragraphs.join("\n").length > MAX_DOCUMENT_TEXT) throw new Error("Document text is too long.");
+    return { kind: "docx", name: file.name, paragraphs, original: paragraphs.join("\n") };
+  }
+  throw new Error("Only .txt, .xlsx, and .docx files are supported.");
+};
+
+const documentText = () => {
+  if (!documentState) return [];
+  if (documentState.kind === "xlsx") return documentState.cells.map((cell) => cell.text);
+  return documentState.paragraphs;
+};
+
+const translateDocument = async () => {
+  if (!documentState) return;
+  documentController?.abort();
+  documentController = new AbortController();
+  try {
+    const texts = documentText();
+    const translated = await translateTexts(texts, documentController.signal);
+    if (translated.length !== texts.length) throw new Error("Translation service returned incomplete results.");
+    if (documentState.kind === "xlsx") {
+      documentState.cells.forEach((cell, index) => {
+        documentState.workbook.Sheets[cell.sheetName][cell.address].v = translated[index];
+        documentState.workbook.Sheets[cell.sheetName][cell.address].t = "s";
+      });
+      documentState.translatedCells = translated;
+    } else {
+      documentState.translatedParagraphs = translated;
+    }
+    updateDocumentButtons(true, true);
+    setStatus("Document translated. The original file remains unchanged.");
+  } catch (error) {
+    if (error.name !== "AbortError") setStatus(error.message || "Document translation failed.", true);
+  } finally {
+    documentController = null;
+  }
+};
+
+const exportDocument = async (kind) => {
+  if (!documentState?.translatedParagraphs && documentState?.kind !== "xlsx") {
+    setStatus("Translate the document before exporting.", true);
+    return;
+  }
+  const base = documentState.name.replace(/\.[^.]+$/, "");
+  if (kind === "txt") {
+    const text = documentState.kind === "xlsx"
+      ? documentState.cells.map((cell, index) => `[${cell.sheetName}!${cell.address}]\n${cell.text}\n${documentState.translatedCells?.[index] || ""}`).join("\n")
+      : documentState.translatedParagraphs.join("\n");
+    downloadBlob(new Blob([text], { type: "text/plain;charset=utf-8" }), `${base}.translated.txt`);
+  } else if (kind === "xlsx") {
+    if (documentState.kind !== "xlsx") {
+      const sheet = XLSX.utils.aoa_to_sheet(documentState.translatedParagraphs.map((text) => [text]));
+      downloadBlob(new Blob([XLSX.write({ SheetNames: ["Translation"], Sheets: { Translation: sheet } }, { type: "array", bookType: "xlsx" })]), `${base}.translated.xlsx`);
+    } else {
+      downloadBlob(new Blob([XLSX.write(documentState.workbook, { type: "array", bookType: "xlsx" })]), `${base}.translated.xlsx`);
+    }
+  } else {
+    const paragraphs = documentState.kind === "xlsx" ? documentState.cells.map((cell) => `${cell.sheetName}!${cell.address}: ${cell.text}`) : documentState.translatedParagraphs;
+    downloadBlob(await makeDocx(paragraphs), `${base}.translated.docx`);
+  }
+};
+
+const imageExportRows = () => translatedRegions.map((region, index) => ({
+  order: index + 1,
+  source: region.sourceText,
+  translation: region.translatedText,
+  confidence: region.confidence
+}));
+
+const exportImage = async (kind) => {
+  if (!translatedRegions.length) {
+    setStatus("Translate an image before exporting.", true);
+    return;
+  }
+  const rows = imageExportRows();
+  const header = `Source language: ${els.sourceLang.value}\nTarget language: ${els.targetLang.value}\n\n`;
+  if (kind === "txt") {
+    downloadBlob(new Blob([header + rows.map((row) => `${row.order}. ${row.source}\n${row.translation}`).join("\n\n")], { type: "text/plain;charset=utf-8" }), "image-translation.txt");
+  } else if (kind === "xlsx") {
+    const sheet = XLSX.utils.json_to_sheet(rows);
+    downloadBlob(new Blob([XLSX.write({ SheetNames: ["Image Translation"], Sheets: { "Image Translation": sheet } }, { type: "array", bookType: "xlsx" })]), "image-translation.xlsx");
+  } else {
+    const paragraphs = [header, ...rows.map((row) => `${row.order}. ${row.source}\n${row.translation}`)];
+    downloadBlob(await makeDocx(paragraphs), "image-translation.docx");
+  }
 };
 
 const buildAudioQueue = (regions) =>
@@ -372,6 +576,7 @@ const translateImage = async () => {
     translatedRegions = resultCache.get(cacheKey);
     renderOverlay(translatedRegions);
     renderRegionEditor(translatedRegions);
+    updateImageExportButtons(translatedRegions.length > 0);
     audioQueue = buildAudioQueue(translatedRegions);
     setStatus(`Loaded ${translatedRegions.length} region(s) from cache.`);
     if (els.autoPlayToggle.checked) {
@@ -398,6 +603,7 @@ const translateImage = async () => {
     if (!regions.length) {
       translatedRegions = [];
       renderOverlay(translatedRegions);
+      updateImageExportButtons(false);
       audioQueue = [];
       setStatus("No readable text found.", true);
       return;
@@ -423,6 +629,7 @@ const translateImage = async () => {
     resultCache.set(cacheKey, translatedRegions);
     renderOverlay(translatedRegions);
     renderRegionEditor(translatedRegions);
+    updateImageExportButtons(translatedRegions.length > 0);
     audioQueue = buildAudioQueue(translatedRegions);
 
     setStatus(`Done. Rendered ${translatedRegions.length} translated region(s).`);
@@ -453,6 +660,7 @@ els.regionEditor.addEventListener("input", (event) => {
   translatedRegions[index][field] = event.target.value;
   if (field === "sourceText") {
     resultCache.clear();
+    updateImageExportButtons(false);
   }
   renderOverlay(translatedRegions);
   audioQueue = buildAudioQueue(translatedRegions);
@@ -480,6 +688,7 @@ els.fileInput.addEventListener("change", async (event) => {
     }
     imageObjectUrl = nextObjectUrl;
     resultCache.clear();
+    updateImageExportButtons(false);
     await setImageSource(nextObjectUrl, file.size);
     setStatus("Image loaded.");
   } catch (error) {
@@ -536,6 +745,29 @@ els.loginForm.addEventListener("submit", async (event) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ password: els.passwordInput.value })
     });
+
+    els.documentInput.addEventListener("change", async (event) => {
+      const file = event.target.files?.[0];
+      if (!file) return;
+      try {
+        documentController?.abort();
+        documentState = await importTextDocument(file);
+        updateDocumentButtons(true, false);
+        setStatus(`Loaded ${file.name}. Translate it before exporting.`);
+      } catch (error) {
+        documentState = null;
+        updateDocumentButtons(false, false);
+        setStatus(error.message || "Document import failed.", true);
+      }
+    });
+
+    els.translateDocumentBtn.addEventListener("click", () => translateDocument());
+    els.exportTxtBtn.addEventListener("click", () => exportDocument("txt"));
+    els.exportXlsxBtn.addEventListener("click", () => exportDocument("xlsx"));
+    els.exportDocxBtn.addEventListener("click", () => exportDocument("docx"));
+    els.exportImageTxtBtn.addEventListener("click", () => exportImage("txt"));
+    els.exportImageXlsxBtn.addEventListener("click", () => exportImage("xlsx"));
+    els.exportImageDocxBtn.addEventListener("click", () => exportImage("docx"));
     const payload = await response.json();
     if (!response.ok) {
       throw new Error(payload.error || "Sign-in failed.");

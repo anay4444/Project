@@ -2,6 +2,7 @@ const express = require("express");
 const dotenv = require("dotenv");
 const rateLimit = require("express-rate-limit");
 const crypto = require("node:crypto");
+const { LANGUAGES, isAllowedLanguage, getProviderLanguage } = require("./language-config");
 
 dotenv.config();
 
@@ -12,7 +13,6 @@ const MAX_TTS_TEXT_LENGTH = 4_000;
 const MAX_AUDIO_BYTES = 8 * 1024 * 1024;
 const MAX_TRANSLATION_DURATION_MS = 30_000;
 const MAX_TRANSLATION_CALL_MS = 15_000;
-const LANGUAGE_CODE = /^[a-z]{2,3}(?:-[A-Z]{2})?$/;
 const VOICE_NAME = /^[a-zA-Z0-9_.-]{1,80}$/;
 const TRANSLATION_PROVIDERS = new Set(["libretranslate", "google"]);
 const sessions = new Map();
@@ -83,13 +83,6 @@ class UpstreamError extends Error {
     this.code = code;
   }
 }
-
-const validateLanguage = (value, allowAuto = false) => {
-  if (allowAuto && value === "auto") {
-    return true;
-  }
-  return typeof value === "string" && LANGUAGE_CODE.test(value);
-};
 
 const readResponseWithLimit = async (response, maxBytes) => {
   const contentLength = Number(response.headers.get("content-length"));
@@ -214,9 +207,11 @@ const createApp = () => {
     if (!Array.isArray(texts) || texts.length === 0 || texts.length > MAX_TEXTS || texts.some((text) => typeof text !== "string" || !text.trim() || text.length > MAX_TEXT_LENGTH) || totalLength > MAX_TOTAL_TEXT_LENGTH) {
       return res.status(400).json({ error: "texts must contain up to 60 non-empty strings within the size limits." });
     }
-    if (!validateLanguage(target) || !validateLanguage(source, true)) {
+    if (!isAllowedLanguage(target) || !isAllowedLanguage(source, true)) {
       return res.status(400).json({ error: "Invalid source or target language code." });
     }
+    const providerTarget = getProviderLanguage(target);
+    const providerSource = source === "auto" ? null : getProviderLanguage(source);
 
     const provider = process.env.TRANSLATION_PROVIDER || "libretranslate";
     const translationUrl = process.env.TRANSLATION_URL;
@@ -230,8 +225,8 @@ const createApp = () => {
     try {
       const requestTranslation = async (q) => {
         const body = provider === "google"
-          ? { q, target, ...(source !== "auto" ? { source } : {}) }
-          : { q, target, ...(source !== "auto" ? { source } : {}), ...(apiKey ? { api_key: apiKey } : {}) };
+          ? { q, target: providerTarget, ...(providerSource ? { source: providerSource } : {}) }
+          : { q, target: providerTarget, ...(providerSource ? { source: providerSource } : {}), ...(apiKey ? { api_key: apiKey } : {}) };
         const upstreamUrl = new URL(translationUrl);
         if (provider === "google") {
           upstreamUrl.searchParams.set("key", apiKey);

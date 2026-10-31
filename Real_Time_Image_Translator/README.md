@@ -8,6 +8,8 @@ It is designed for reading comics, manga, or any foreign-language image content 
 
 - OCR text detection from uploaded image or image URL (Tesseract.js)
 - Configurable translation through a local LibreTranslate-compatible server
+- Seven-language controls: English, Spanish, Italian, Hindi, Japanese, Korean, and Simplified Chinese
+- Browser-side `.txt`, `.xlsx`, and `.docx` import and translated-copy export
 - Overlay translation rendered in original text regions
 - Floating controls (overlay, language, confidence, reading order, voice, speed)
 - Hotkeys for quick use while reading
@@ -70,6 +72,7 @@ The server binds to `127.0.0.1` by default, which is the intended private/local 
 
 - Source language (`auto` by default)
 - Target language (`en` default)
+- Supported languages: English (`en`), Spanish (`es`), Italian (`it`), Hindi (`hi`), Japanese (`ja`), Korean (`ko`), and Chinese (`zh`, Simplified Chinese)
 - Confidence threshold (0-100)
 - Reading order: LTR or manga/comics-friendly RTL
 - Voice + speed for TTS
@@ -88,6 +91,7 @@ The server binds to `127.0.0.1` by default, which is the intended private/local 
 - Translation has both per-upstream-call and overall request deadlines. Invalid or oversized upstream responses return a bounded 502 response; timeouts return 504.
 - TTS follows the same distinction: invalid, non-success, or oversized upstream responses return 502; actual upstream timeouts return 504.
 - Browser uploads are limited to 15 MB, 10,000 pixels per dimension, and 40 million pixels. The result cache is an eight-entry LRU and stale OCR/translation work is cancelled or ignored.
+- Document uploads are limited to 15 MB, 100,000 extracted characters, 5,000 eligible XLSX text cells, and 80 MB decompressed ZIP content. Only `.txt`, `.xlsx`, and `.docx` are accepted; macro-enabled and legacy formats are rejected. Numbers, formulas, blank cells, and original files are not overwritten.
 - Rate limits and concurrency counters are in-memory and per Node process. For multiple replicas, use a shared rate-limit store and enforce limits at the reverse proxy. Do not enable Express's `trust proxy` unless it is configured for the exact trusted proxy hops; otherwise client IPs must not be taken from forwarded headers.
 
 ## Recommended free architecture and trade-offs
@@ -97,6 +101,12 @@ The default setup keeps OCR in the browser and sends only grouped text to a self
 Google Cloud Translation can still be used by setting `TRANSLATION_PROVIDER=google`, `TRANSLATION_URL=https://translation.googleapis.com/language/translate/v2`, and `TRANSLATION_API_KEY` on the server. The server appends the key to the upstream request and never sends it to the browser. This option introduces billing, quota, and external data-flow/privacy considerations and is not the default. No translation engine is unlimited or cost-free: self-hosting shifts cost to hardware, electricity, model storage, and maintenance. Keep the service bound to localhost for private use. If deployed, set `TRANSLATOR_ACCESS_PASSWORD`, use HTTPS, and put the app behind a reverse proxy with network access controls.
 
 OCR remains local in the browser, which protects image pixels from the translation service but uses client CPU and memory. Tesseract's browser script, worker, and WASM core are served locally under `public/tesseract/`; language data is fetched only from the pinned `tessdata.projectnaptha.com` origin allowed by CSP. This keeps executable OCR assets local while avoiding a large repository copy of language models. Image URLs are loaded by the browser and may still reveal the URL to the image host; uploaded image pixels stay in the browser, while grouped OCR text is sent to the configured translation service.
+
+Document parsing and export also happen in the browser using vendored SheetJS and JSZip assets. DOCX text is extracted directly from the document XML; only extracted text cells or paragraphs are sent to the configured translation service. XLSX worksheet names, positions, formulas, numbers, and blank cells are preserved where SheetJS supports them. DOCX paragraph order is preserved, but complex styles, headers/footers, tracked changes, embedded objects, and table formatting are simplified; macros and external links are never executed.
+
+The production dependency audit currently reports high-severity SheetJS advisories with no upstream fix available for the pinned browser build. The app reduces exposure with local-only processing, strict file/cell/archive limits, and no macro or external-link execution; review or replace SheetJS before processing untrusted files at larger scale.
+
+Chinese UI selection uses Simplified Chinese (`zh`/`chi_sim`). Traditional Chinese OCR (`chi_tra`) is available in the internal mapping for future use, but is not exposed as a separate UI language. Translation quality and model-pair availability depend on the locally installed LibreTranslate-compatible models; the app reports provider failures rather than silently changing language or sending the original document elsewhere.
 
 Sessions are intentionally stored only in the Node process memory. They are cleared whenever the process restarts and are not shared across multiple app instances. For deployment, use one instance behind HTTPS and a reverse proxy, or replace the in-memory session map with a shared, authenticated session store before running multiple replicas. Do not expose the app directly to the public internet with the default in-memory setup.
 
