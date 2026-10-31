@@ -36,9 +36,12 @@ let imageObjectUrl = null;
 
 const resultCache = createLruCache(8);
 const imageObserver = new MutationObserver(() => {
-  cancelTranslation();
   if (els.autoRefreshToggle.checked && els.sourceImage.src) {
-    setTimeout(() => translateImage().catch((error) => setStatus(error.message, true)), 0);
+    setTimeout(() => {
+      if (!translationInFlight) {
+        translateImage().catch((error) => setStatus(error.message, true));
+      }
+    }, 0);
   }
 });
 
@@ -62,6 +65,32 @@ const cancelTranslation = () => {
   translationRun += 1;
   translationController?.abort();
   translationController = null;
+  translationInFlight = false;
+};
+
+const setImageSource = async (src, size) => {
+  cancelTranslation();
+  await loadImage(src, size);
+  els.sourceImage.src = src;
+};
+
+const loadRemoteImage = async (url) => {
+  const response = await fetch(url, {
+    signal: AbortSignal.timeout(15_000),
+    mode: "cors"
+  });
+  if (!response.ok) {
+    throw new Error("Remote image could not be downloaded.");
+  }
+  const blob = await validateImageInfo.readResponseBlobWithLimit(response);
+  const objectUrl = URL.createObjectURL(blob);
+  try {
+    await loadImage(objectUrl, blob.size);
+  } catch (error) {
+    URL.revokeObjectURL(objectUrl);
+    throw error;
+  }
+  return { objectUrl, size: blob.size };
 };
 
 imageObserver.observe(els.sourceImage, { attributes: true, attributeFilter: ["src"] });
@@ -247,7 +276,10 @@ const performTranslation = async (texts, source, target, signal) => {
 const performOcr = async () => {
   setStatus("Running OCR...");
   const result = await window.Tesseract.recognize(els.sourceImage, "jpn+eng", {
-    logger: () => {}
+    logger: () => {},
+    workerPath: "/tesseract/worker.min.js",
+    corePath: "/tesseract/tesseract-core.wasm.js",
+    langPath: "https://tessdata.projectnaptha.com/4.0.0"
   });
   return result?.data?.words || [];
 };
@@ -351,13 +383,17 @@ const translateImage = async () => {
   }
 
   const run = ++translationRun;
-  translationController = new AbortController();
+  const controller = new AbortController();
+  translationController = controller;
   try {
     const minConfidence = Number(els.minConfidence.value) || 0;
     const sourceLanguage = els.sourceLang.value.trim() || "auto";
     const targetLanguage = els.targetLang.value.trim() || "en";
 
     const words = await performOcr();
+    if (run !== translationRun) {
+      return;
+    }
     const regions = groupWordsIntoLines(normalizeWordsToRegions(words, minConfidence), els.readingOrder.value);
     if (!regions.length) {
       translatedRegions = [];
@@ -373,7 +409,7 @@ const translateImage = async () => {
       orderedRegions.map((region) => region.sourceText),
       sourceLanguage,
       targetLanguage,
-      translationController.signal
+      controller.signal
     );
     if (run !== translationRun) {
       return;
@@ -396,10 +432,15 @@ const translateImage = async () => {
       playQueueFromCurrent().catch((error) => setStatus(error.message, true));
     }
   } catch (error) {
+    if (run !== translationRun) {
+      return;
+    }
     setStatus(error.message || "Failed to translate image.", true);
   } finally {
-    translationInFlight = false;
-    translationController = null;
+    if (translationController === controller) {
+      translationInFlight = false;
+      translationController = null;
+    }
   }
 };
 
@@ -426,21 +467,25 @@ els.fileInput.addEventListener("change", async (event) => {
   stopAudio();
   queueIndex = 0;
 
+  let nextObjectUrl = null;
   try {
     cancelTranslation();
     if (file.size > 15 * 1024 * 1024) {
       throw new Error("Image must be 15 MB or smaller.");
     }
-    const nextObjectUrl = URL.createObjectURL(file);
+    nextObjectUrl = URL.createObjectURL(file);
     await loadImage(nextObjectUrl, file.size);
     if (imageObjectUrl) {
       URL.revokeObjectURL(imageObjectUrl);
     }
     imageObjectUrl = nextObjectUrl;
     resultCache.clear();
-    els.sourceImage.src = nextObjectUrl;
+    await setImageSource(nextObjectUrl, file.size);
     setStatus("Image loaded.");
   } catch (error) {
+    if (nextObjectUrl) {
+      URL.revokeObjectURL(nextObjectUrl);
+    }
     setStatus(error.message || "Failed to read selected image.", true);
   }
 });
@@ -455,12 +500,22 @@ els.loadUrlBtn.addEventListener("click", async () => {
   stopAudio();
   queueIndex = 0;
   cancelTranslation();
+  let nextObjectUrl = null;
   try {
-    await loadImage(safeUrl, 1);
+    const remoteImage = await loadRemoteImage(safeUrl);
+    nextObjectUrl = remoteImage.objectUrl;
+    const { size } = remoteImage;
+    if (imageObjectUrl) {
+      URL.revokeObjectURL(imageObjectUrl);
+    }
+    imageObjectUrl = nextObjectUrl;
     resultCache.clear();
-    els.sourceImage.src = safeUrl;
+    await setImageSource(nextObjectUrl, size);
     setStatus("Image URL loaded.");
   } catch (error) {
+    if (nextObjectUrl) {
+      URL.revokeObjectURL(nextObjectUrl);
+    }
     setStatus(error.message || "Image could not be loaded.", true);
   }
 });

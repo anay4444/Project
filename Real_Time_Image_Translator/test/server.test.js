@@ -89,7 +89,7 @@ test("rejects an oversized TTS response", async (t) => {
   });
 
   const result = await request(server, "/api/tts", { text: "hello" });
-  assert.equal(result.status, 504);
+  assert.equal(result.status, 502);
 });
 
 test("caps concurrent translation requests", async (t) => {
