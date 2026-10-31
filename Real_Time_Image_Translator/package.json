@@ -13,7 +13,6 @@
     "dotenv": "^16.4.5",
     "express": "^4.21.1",
     "express-rate-limit": "^7.4.1",
-    "jszip": "^3.10.1",
-    "xlsx": "^0.18.5"
+    "jszip": "^3.10.1"
   }
 }

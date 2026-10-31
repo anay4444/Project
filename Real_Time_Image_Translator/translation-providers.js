@@ -1,8 +1,11 @@
 const GEMINI_PROVIDER = "gemini";
-const GEMINI_DEFAULT_MODEL = "gemini-2.0-flash";
+const GEMINI_DEFAULT_MODEL = "gemini-2.5-flash-lite";
 const GEMINI_KEY = /^[A-Za-z0-9._-]{20,512}$/;
+const GEMINI_MODEL = /^[a-z0-9][a-z0-9._-]{1,79}$/;
+const MAX_GEMINI_RESULT_TEXT = 2_000;
 
 const isValidGeminiKey = (value) => typeof value === "string" && GEMINI_KEY.test(value);
+const isValidGeminiModel = (value) => typeof value === "string" && GEMINI_MODEL.test(value);
 
 const buildGeminiPrompt = ({ segments, source, target, glossary, contextWindow }) => {
   const rows = segments.map((segment, index) => {
@@ -33,12 +36,12 @@ const parseGeminiResponse = (payload, ids) => {
   } catch {
     throw new Error("invalid_response");
   }
-  if (!Array.isArray(parsed.translations) || parsed.translations.length !== ids.length) {
+  if (!Array.isArray(parsed.translations) || parsed.translations.length !== ids.length || ids.length > 60) {
     throw new Error("invalid_response");
   }
   const seen = new Set();
   const translations = parsed.translations.map((item) => {
-    if (!item || typeof item.id !== "string" || !ids.includes(item.id) || seen.has(item.id) || typeof item.text !== "string") {
+    if (!item || typeof item.id !== "string" || item.id.length > 80 || !ids.includes(item.id) || seen.has(item.id) || typeof item.text !== "string" || item.text.length > MAX_GEMINI_RESULT_TEXT) {
       throw new Error("invalid_response");
     }
     seen.add(item.id);
@@ -47,13 +50,14 @@ const parseGeminiResponse = (payload, ids) => {
   if (seen.size !== ids.length) {
     throw new Error("invalid_response");
   }
-  return translations;
+  return ids.map((id) => translations.find((item) => item.id === id));
 };
 
 module.exports = {
   GEMINI_PROVIDER,
   GEMINI_DEFAULT_MODEL,
   isValidGeminiKey,
+  isValidGeminiModel,
   buildGeminiPrompt,
   parseGeminiResponse
 };

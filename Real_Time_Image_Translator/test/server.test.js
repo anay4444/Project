@@ -219,6 +219,7 @@ serialTest("returns 504 when the overall translation deadline aborts work", asyn
 serialTest("connects Gemini for one in-memory session and maps structured context", async (t) => {
   const originalFetch = global.fetch;
   const previousProvider = process.env.TRANSLATION_PROVIDER;
+  const previousModel = process.env.GEMINI_MODEL;
   let captured;
   global.fetch = async (url, options) => {
     captured = { url: String(url), headers: options.headers, body: JSON.parse(options.body) };
@@ -236,12 +237,15 @@ serialTest("connects Gemini for one in-memory session and maps structured contex
     global.fetch = originalFetch;
     if (previousProvider === undefined) delete process.env.TRANSLATION_PROVIDER;
     else process.env.TRANSLATION_PROVIDER = previousProvider;
+    if (previousModel === undefined) delete process.env.GEMINI_MODEL;
+    else process.env.GEMINI_MODEL = previousModel;
   });
 
   const key = "AIza" + "a".repeat(36);
   const connected = await request(server, "/api/provider/connect", { provider: "gemini", apiKey: key });
   assert.equal(connected.status, 200);
   assert.doesNotMatch(connected.body.toString(), new RegExp(key));
+  assert.equal(JSON.parse(connected.body).model, "gemini-2.5-flash-lite");
   const cookie = connected.headers["set-cookie"][0];
   const result = await request(server, "/api/translate", {
     provider: "gemini",

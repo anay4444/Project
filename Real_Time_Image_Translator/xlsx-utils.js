@@ -1,0 +1,135 @@
+const xmlEscape = (value) => String(value)
+  .replace(/[<>&'"]/g, (char) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", "'": "&apos;", "\"": "&quot;" }[char]));
+
+const xmlUnescape = (value) => value
+  .replace(/&lt;/g, "<")
+  .replace(/&gt;/g, ">")
+  .replace(/&quot;/g, "\"")
+  .replace(/&apos;/g, "'")
+  .replace(/&amp;/g, "&");
+
+const columnNumber = (address) => {
+  const match = /^([A-Z]+)\d+$/.exec(address);
+  if (!match) throw new Error("Invalid XLSX cell address.");
+  return [...match[1]].reduce((total, char) => total * 26 + char.charCodeAt(0) - 64, 0);
+};
+
+const cellAddress = (column, row) => {
+  let name = "";
+  for (let value = column; value > 0; value = Math.floor((value - 1) / 26)) {
+    name = String.fromCharCode(65 + ((value - 1) % 26)) + name;
+  }
+  return `${name}${row}`;
+};
+
+const tagValue = (xml, tag) => {
+  const match = new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)</${tag}>`).exec(xml);
+  return match ? xmlUnescape(match[1]) : "";
+};
+
+const parseRelationships = (xml) => Object.fromEntries([...xml.matchAll(/<Relationship\b([^>]*)\/?>/g)].map((match) => {
+  const attrs = Object.fromEntries([...match[1].matchAll(/(\w+)="([^"]*)"/g)].map((item) => [item[1], item[2]]));
+  return [attrs.Id, attrs.Target];
+}));
+
+const parseXlsx = async (buffer, JSZip, limits = {}) => {
+  const zip = await JSZip.loadAsync(buffer);
+  const workbookXml = await zip.file("xl/workbook.xml")?.async("text");
+  const relationshipsXml = await zip.file("xl/_rels/workbook.xml.rels")?.async("text");
+  if (!workbookXml || !relationshipsXml) throw new Error("The XLSX workbook is malformed.");
+  const relationships = parseRelationships(relationshipsXml);
+  const sharedStringsXml = await zip.file("xl/sharedStrings.xml")?.async("text");
+  const sharedStrings = sharedStringsXml
+    ? [...sharedStringsXml.matchAll(/<si\b[^>]*>([\s\S]*?)<\/si>/g)].map((match) =>
+      [...match[1].matchAll(/<t\b[^>]*>([\s\S]*?)<\/t>/g)].map((item) => xmlUnescape(item[1])).join("")
+    )
+    : [];
+  const sheets = [];
+  for (const sheetMatch of workbookXml.matchAll(/<sheet\b([^>]*)\/?>/g)) {
+    const attrs = Object.fromEntries([...sheetMatch[1].matchAll(/(\w+):?(\w*)="([^"]*)"/g)].map((item) => [item[2] || item[1], item[3]]));
+    const target = relationships[attrs.id]?.replace(/^\/?(?:xl\/)?/, "");
+    if (!target || !target.startsWith("worksheets/")) throw new Error("The XLSX workbook has an invalid worksheet relationship.");
+    const sheetXml = await zip.file(`xl/${target}`)?.async("text");
+    if (!sheetXml) throw new Error("The XLSX workbook is missing a worksheet.");
+    const cells = {};
+    for (const cellMatch of sheetXml.matchAll(/<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g)) {
+      const attrs = Object.fromEntries([...cellMatch[1].matchAll(/(\w+):?(\w*)="([^"]*)"/g)].map((item) => [item[2] || item[1], item[3]]));
+      const body = cellMatch[2] || "";
+      const address = attrs.r;
+      if (!address) throw new Error("The XLSX workbook contains a cell without an address.");
+      const formula = tagValue(body, "f");
+      const type = attrs.t || "";
+      const raw = tagValue(body, "v");
+      let value = raw;
+      if (type === "s") value = sharedStrings[Number(raw)] ?? "";
+      else if (type === "inlineStr") value = [...body.matchAll(/<t\b[^>]*>([\s\S]*?)<\/t>/g)].map((item) => xmlUnescape(item[1])).join("");
+      else if (type !== "str" && raw !== "" && Number.isFinite(Number(raw))) value = Number(raw);
+      cells[address] = { value, formula, type };
+    }
+    if (Object.keys(cells).length > (limits.maxCells || 50_000)) throw new Error("The XLSX worksheet has too many cells.");
+    sheets.push({ name: attrs.name, cells });
+  }
+  if (!sheets.length || sheets.length > (limits.maxSheets || 100)) throw new Error("The XLSX workbook has an invalid worksheet count.");
+  return { sheets };
+};
+
+const collectXlsxTextCells = (workbook, maxCells = 5_000) => {
+  const cells = [];
+  workbook.sheets.forEach((sheet) => Object.entries(sheet.cells).forEach(([address, cell]) => {
+    if (!cell.formula && typeof cell.value === "string" && cell.value.trim()) {
+      cells.push({ sheetName: sheet.name, address, text: cell.value });
+    }
+  }));
+  if (cells.length > maxCells) throw new Error("Workbook has too many text cells.");
+  return cells;
+};
+
+const applyXlsxTranslations = (workbook, cells, translations) => {
+  if (cells.length !== translations.length) throw new Error("Translation service returned incomplete results.");
+  cells.forEach((cell, index) => {
+    const sheet = workbook.sheets.find((item) => item.name === cell.sheetName);
+    if (!sheet?.cells[cell.address]) throw new Error("The XLSX cell mapping is invalid.");
+    sheet.cells[cell.address].value = translations[index];
+    sheet.cells[cell.address].type = "inlineStr";
+  });
+  return workbook;
+};
+
+const sheetXml = (sheet) => {
+  const entries = Object.entries(sheet.cells).sort((a, b) => {
+    const rowA = Number(a[0].match(/\d+$/)?.[0] || 0);
+    const rowB = Number(b[0].match(/\d+$/)?.[0] || 0);
+    return rowA - rowB || columnNumber(a[0]) - columnNumber(b[0]);
+  });
+  const rows = new Map();
+  entries.forEach(([address, cell]) => {
+    const row = Number(address.match(/\d+$/)?.[0]);
+    if (!rows.has(row)) rows.set(row, []);
+    const value = typeof cell.value === "number" ? `<v>${cell.value}</v>` : `<is><t xml:space="preserve">${xmlEscape(cell.value ?? "")}</t></is>`;
+    const type = typeof cell.value === "number" ? "" : " t=\"inlineStr\"";
+    rows.get(row).push(`<c r="${address}"${type}>${cell.formula ? `<f>${xmlEscape(cell.formula)}</f>` : ""}${value}</c>`);
+  });
+  const rowXml = [...rows.entries()].map(([row, cells]) => `<row r="${row}">${cells.join("")}</row>`).join("");
+  return `<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${rowXml}</sheetData></worksheet>`;
+};
+
+const buildXlsx = async (workbook, JSZip) => {
+  const zip = new JSZip();
+  const overrides = workbook.sheets.map((_sheet, index) => `<Override PartName="/xl/worksheets/sheet${index + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join("");
+  const sheets = workbook.sheets.map((sheet, index) => `<sheet name="${xmlEscape(sheet.name)}" sheetId="${index + 1}" r:id="rId${index + 1}"/>`).join("");
+  const relationships = workbook.sheets.map((_sheet, index) => `<Relationship Id="rId${index + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${index + 1}.xml"/>`).join("");
+  zip.file("[Content_Types].xml", `<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>${overrides}</Types>`);
+  zip.file("_rels/.rels", `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`);
+  zip.file("xl/workbook.xml", `<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${sheets}</sheets></workbook>`);
+  zip.file("xl/_rels/workbook.xml.rels", `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${relationships}</Relationships>`);
+  workbook.sheets.forEach((sheet, index) => zip.file(`xl/worksheets/sheet${index + 1}.xml`, sheetXml(sheet)));
+  return zip.generateAsync({ type: "nodebuffer" });
+};
+
+const rowsToXlsx = (name, rows) => ({
+  sheets: [{ name, cells: Object.fromEntries(rows.flatMap((row, rowIndex) =>
+    Object.entries(row).map(([key, value], columnIndex) => [cellAddress(columnIndex + 1, rowIndex + 1), { value: value ?? "", formula: "", type: typeof value === "number" ? "n" : "inlineStr" }])
+  )) }]
+});
+
+module.exports = { parseXlsx, collectXlsxTextCells, applyXlsxTranslations, buildXlsx, rowsToXlsx };
