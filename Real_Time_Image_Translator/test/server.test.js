@@ -3,6 +3,8 @@ const assert = require("node:assert/strict");
 const http = require("node:http");
 const { createApp } = require("../server");
 
+const serialTest = (name, fn) => test(name, { concurrency: false }, fn);
+
 const request = (server, path, body, headers = {}) =>
   new Promise((resolve, reject) => {
     const payload = body === undefined ? "" : JSON.stringify(body);
@@ -20,24 +22,39 @@ const request = (server, path, body, headers = {}) =>
     req.end(payload);
   });
 
-test("health and translation work with a LibreTranslate-style response", async (t) => {
+serialTest("health and translation work with a LibreTranslate-style response", async (t) => {
   const originalFetch = global.fetch;
   process.env.TRANSLATION_URL = "http://translation.test/translate";
   process.env.TRANSLATION_PROVIDER = "libretranslate";
-  global.fetch = async () => new Response(JSON.stringify({ translatedText: "hola" }), { status: 200 });
+  const calls = [];
+  global.fetch = async (_url, options) => {
+    calls.push(JSON.parse(options.body));
+    return new Response(JSON.stringify({ translatedText: "hola" }), { status: 200 });
+  };
   const server = createApp().listen(0);
   t.after(() => {
     server.close();
     global.fetch = originalFetch;
   });
 
+  serialTest("rejects languages outside the allowlist", async (t) => {
+    const server = createApp().listen(0);
+    t.after(() => server.close());
+    assert.equal((await request(server, "/api/translate", { texts: ["sample"], source: "fr", target: "en" })).status, 400);
+    assert.equal((await request(server, "/api/translate", { texts: ["sample"], source: "en", target: "de" })).status, 400);
+  });
+
   assert.equal((await request(server, "/api/health")).status, 200);
   const result = await request(server, "/api/translate", { texts: ["hello"], source: "en", target: "es" });
   assert.equal(result.status, 200);
   assert.deepEqual(JSON.parse(result.body), { translated: ["hola"] });
+  for (const [source, target] of [["ja", "en"], ["ko", "zh"], ["zh", "hi"], ["it", "ja"], ["hi", "ko"], ["es", "it"]]) {
+    assert.equal((await request(server, "/api/translate", { texts: ["sample"], source, target })).status, 200);
+  }
+  assert.deepEqual(calls.map((body) => [body.source, body.target]), [["en", "es"], ["ja", "en"], ["ko", "zh"], ["zh", "hi"], ["it", "ja"], ["hi", "ko"], ["es", "it"]]);
 });
 
-test("rejects oversized translation input before contacting upstream", async (t) => {
+serialTest("rejects oversized translation input before contacting upstream", async (t) => {
   const originalFetch = global.fetch;
   global.fetch = async () => {
     throw new Error("should not be called");
@@ -52,7 +69,7 @@ test("rejects oversized translation input before contacting upstream", async (t)
   assert.equal(result.status, 400);
 });
 
-test("returns a generic upstream error without leaking details", async (t) => {
+serialTest("returns a generic upstream error without leaking details", async (t) => {
   const originalFetch = global.fetch;
   process.env.TRANSLATION_URL = "http://translation.test/translate";
   global.fetch = async () => {
@@ -69,7 +86,7 @@ test("returns a generic upstream error without leaking details", async (t) => {
   assert.doesNotMatch(result.body.toString(), /private upstream detail/);
 });
 
-test("rejects invalid TTS values", async (t) => {
+serialTest("rejects invalid TTS values", async (t) => {
   const server = createApp().listen(0);
   t.after(() => server.close());
   process.env.KOKORO_TTS_URL = "http://tts.test";
@@ -78,7 +95,7 @@ test("rejects invalid TTS values", async (t) => {
   assert.equal(result.status, 400);
 });
 
-test("rejects an oversized TTS response", async (t) => {
+serialTest("rejects an oversized TTS response", async (t) => {
   const originalFetch = global.fetch;
   process.env.KOKORO_TTS_URL = "http://tts.test";
   global.fetch = async () => new Response(new Uint8Array(8 * 1024 * 1024 + 1), { status: 200, headers: { "content-type": "audio/mpeg" } });
@@ -92,7 +109,7 @@ test("rejects an oversized TTS response", async (t) => {
   assert.equal(result.status, 502);
 });
 
-test("caps concurrent translation requests", async (t) => {
+serialTest("caps concurrent translation requests", async (t) => {
   const originalFetch = global.fetch;
   process.env.TRANSLATION_URL = "http://translation.test/translate";
   global.fetch = async () => {
@@ -109,7 +126,7 @@ test("caps concurrent translation requests", async (t) => {
   assert.equal(results.filter((result) => result.status === 429).length, 1);
 });
 
-test("requires a session when deployment authentication is enabled", async (t) => {
+serialTest("requires a session when deployment authentication is enabled", async (t) => {
   const previousPassword = process.env.TRANSLATOR_ACCESS_PASSWORD;
   process.env.TRANSLATOR_ACCESS_PASSWORD = "correct horse";
   process.env.TRANSLATION_URL = "http://translation.test/translate";
@@ -132,7 +149,7 @@ test("requires a session when deployment authentication is enabled", async (t) =
   assert.equal(authorized.status, 200);
 });
 
-test("rejects unsupported providers and missing Google credentials", async (t) => {
+serialTest("rejects unsupported providers and missing Google credentials", async (t) => {
   const originalFetch = global.fetch;
   const previousProvider = process.env.TRANSLATION_PROVIDER;
   const previousKey = process.env.TRANSLATION_API_KEY;
@@ -162,7 +179,7 @@ test("rejects unsupported providers and missing Google credentials", async (t) =
   assert.match(calledUrl, /[?&]key=server-only-key/);
 });
 
-test("returns 502 for malformed or non-success upstream responses", async (t) => {
+serialTest("returns 502 for malformed or non-success upstream responses", async (t) => {
   const originalFetch = global.fetch;
   process.env.TRANSLATION_PROVIDER = "libretranslate";
   process.env.TRANSLATION_URL = "http://translation.test/translate";
@@ -178,7 +195,7 @@ test("returns 502 for malformed or non-success upstream responses", async (t) =>
   assert.equal((await request(server, "/api/translate", { texts: ["hello"] })).status, 502);
 });
 
-test("returns 504 when the overall translation deadline aborts work", async (t) => {
+serialTest("returns 504 when the overall translation deadline aborts work", async (t) => {
   const originalFetch = global.fetch;
   const previousDeadline = process.env.TRANSLATION_DEADLINE_MS;
   process.env.TRANSLATION_PROVIDER = "libretranslate";
@@ -197,4 +214,67 @@ test("returns 504 when the overall translation deadline aborts work", async (t) 
 
   const result = await request(server, "/api/translate", { texts: ["hello"] });
   assert.equal(result.status, 504);
+});
+
+serialTest("connects Gemini for one in-memory session and maps structured context", async (t) => {
+  const originalFetch = global.fetch;
+  const previousProvider = process.env.TRANSLATION_PROVIDER;
+  let captured;
+  global.fetch = async (url, options) => {
+    captured = { url: String(url), headers: options.headers, body: JSON.parse(options.body) };
+    return new Response(JSON.stringify({
+      candidates: [{ content: { parts: [{ text: JSON.stringify({ translations: [
+        { id: "0", text: "Wait!" },
+        { id: "1", text: "Here." }
+      ] }) }] } }]
+    }), { status: 200 });
+  };
+  process.env.TRANSLATION_PROVIDER = "libretranslate";
+  const server = createApp().listen(0);
+  t.after(() => {
+    server.close();
+    global.fetch = originalFetch;
+    if (previousProvider === undefined) delete process.env.TRANSLATION_PROVIDER;
+    else process.env.TRANSLATION_PROVIDER = previousProvider;
+  });
+
+  const key = "AIza" + "a".repeat(36);
+  const connected = await request(server, "/api/provider/connect", { provider: "gemini", apiKey: key });
+  assert.equal(connected.status, 200);
+  assert.doesNotMatch(connected.body.toString(), new RegExp(key));
+  const cookie = connected.headers["set-cookie"][0];
+  const result = await request(server, "/api/translate", {
+    provider: "gemini",
+    source: "ja",
+    target: "en",
+    texts: ["先輩、待って!", "ここです。"],
+    segments: [{ id: "0", text: "先輩、待って!" }, { id: "1", text: "ここです。" }],
+    glossary: "先輩: senpai",
+    contextWindow: 1
+  }, { cookie });
+  assert.equal(result.status, 200);
+  assert.deepEqual(JSON.parse(result.body).translated, ["Wait!", "Here."]);
+  assert.match(captured.url, /generativelanguage\.googleapis\.com/);
+  assert.match(captured.body.contents[0].parts[0].text, /senpai/);
+  assert.equal(captured.headers["x-goog-api-key"], key);
+  assert.doesNotMatch(captured.url, /AIza/);
+});
+
+serialTest("rejects malformed cloud segments and exposes quota status", async (t) => {
+  const originalFetch = global.fetch;
+  global.fetch = async () => new Response("quota", { status: 429 });
+  const server = createApp().listen(0);
+  t.after(() => {
+    server.close();
+    global.fetch = originalFetch;
+  });
+  const connected = await request(server, "/api/provider/connect", { provider: "gemini", apiKey: "AIza" + "b".repeat(36) });
+  const cookie = connected.headers["set-cookie"][0];
+  assert.equal((await request(server, "/api/translate", {
+    provider: "gemini", texts: ["hello"], segments: [{ id: "1", text: "hello" }]
+  }, { cookie })).status, 400);
+  const quota = await request(server, "/api/translate", {
+    provider: "gemini", texts: ["hello"], segments: [{ id: "0", text: "hello" }]
+  }, { cookie });
+  assert.equal(quota.status, 429);
 });

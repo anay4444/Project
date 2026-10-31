@@ -5,6 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Real-Time Image Translator</title>
     <link rel="stylesheet" href="styles.css" />
+    <script src="language-config.js" defer></script>
+    <script src="vendor/xlsx.full.min.js" defer></script>
+    <script src="vendor/jszip.min.js" defer></script>
     <script src="tesseract/tesseract.min.js" defer></script>
     <script src="cache.js" defer></script>
     <script src="image-validation.js" defer></script>
@@ -42,11 +45,35 @@
       <label><input id="autoRefreshToggle" type="checkbox" checked /> Auto-refresh on changes</label>
       <label>
         Source language
-        <input id="sourceLang" type="text" value="auto" />
+        <select id="sourceLang"></select>
       </label>
       <label>
         Target language
-        <input id="targetLang" type="text" value="en" />
+        <select id="targetLang"></select>
+      </label>
+      <label>
+        Translation provider
+        <select id="providerSelect">
+          <option value="local">Local LibreTranslate-compatible service</option>
+          <option value="gemini">Gemini cloud (your API key)</option>
+        </select>
+      </label>
+      <div id="cloudProviderControls" hidden>
+        <p class="hint">Cloud mode sends extracted text, nearby segment context, and your glossary to Gemini. Image pixels and document archives stay in this browser. Gemini account terms, quotas, and charges apply.</p>
+        <label>Gemini API key (kept in this server session only)<input id="geminiKeyInput" type="password" autocomplete="off" /></label>
+        <div class="buttons">
+          <button id="connectGeminiBtn" type="button">Connect Gemini</button>
+          <button id="disconnectProviderBtn" type="button">Disconnect</button>
+        </div>
+        <p id="providerStatus" class="hint">Not connected.</p>
+      </div>
+      <label>
+        Context window (nearby segments)
+        <input id="contextWindow" type="number" min="0" max="5" value="2" />
+      </label>
+      <label>
+        Glossary (one preferred term per line, e.g. <code>君: you</code>)
+        <textarea id="glossaryInput" rows="3" maxlength="5000"></textarea>
       </label>
       <label>
         Min confidence (0-100)
@@ -75,6 +102,21 @@
         </label>
         <button type="submit">Sign in</button>
       </form>
+      <label>
+        Import text/document
+        <input id="documentInput" type="file" accept=".txt,.xlsx,.docx,text/plain,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.openxmlformats-officedocument.wordprocessingml.document" />
+      </label>
+      <div class="buttons">
+        <button id="translateDocumentBtn" type="button" disabled>Translate document</button>
+        <button id="exportTxtBtn" type="button" disabled>Export TXT</button>
+        <button id="exportXlsxBtn" type="button" disabled>Export XLSX</button>
+        <button id="exportDocxBtn" type="button" disabled>Export DOCX</button>
+      </div>
+      <div class="buttons">
+        <button id="exportImageTxtBtn" type="button" disabled>Image TXT</button>
+        <button id="exportImageXlsxBtn" type="button" disabled>Image XLSX</button>
+        <button id="exportImageDocxBtn" type="button" disabled>Image DOCX</button>
+      </div>
       <div class="buttons">
         <button id="translateBtn" type="button">Translate now</button>
         <button id="playBtn" type="button">Play</button>
