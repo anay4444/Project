@@ -7,6 +7,7 @@ const {
   GEMINI_PROVIDER,
   GEMINI_DEFAULT_MODEL,
   isValidGeminiKey,
+  isValidGeminiModel,
   buildGeminiPrompt,
   parseGeminiResponse
 } = require("./translation-providers");
@@ -243,7 +244,11 @@ const createApp = () => {
       session = sessions.get(token);
       setSessionCookie(res, token);
     }
-    session.cloud = { provider: GEMINI_PROVIDER, apiKey, model: process.env.GEMINI_MODEL || GEMINI_DEFAULT_MODEL };
+    const model = process.env.GEMINI_MODEL || GEMINI_DEFAULT_MODEL;
+    if (!isValidGeminiModel(model)) {
+      return res.status(503).json({ error: "Gemini model configuration is invalid." });
+    }
+    session.cloud = { provider: GEMINI_PROVIDER, apiKey, model };
     return res.json({ provider: GEMINI_PROVIDER, connected: true, model: session.cloud.model });
   });
 
@@ -298,6 +303,8 @@ const createApp = () => {
         }, MAX_TRANSLATION_CALL_MS, deadlineSignal);
         if (!response.ok) {
           if (response.status === 429) throw new UpstreamError(429, "translation_quota_exceeded");
+          if (response.status === 400 || response.status === 404) throw new UpstreamError(502, "translation_model_unavailable");
+          if (response.status === 401 || response.status === 403) throw new UpstreamError(502, "translation_credentials_rejected");
           throw new UpstreamError(502, "translation_upstream_error");
         }
         let payload;
@@ -326,6 +333,8 @@ const createApp = () => {
         }, MAX_TRANSLATION_CALL_MS, deadlineSignal);
         if (!response.ok) {
           if (response.status === 429) throw new UpstreamError(429, "translation_quota_exceeded");
+          if (response.status === 400 || response.status === 404) throw new UpstreamError(502, "translation_model_unavailable");
+          if (response.status === 401 || response.status === 403) throw new UpstreamError(502, "translation_credentials_rejected");
           throw new UpstreamError(502, "translation_upstream_error");
         }
         let payload;
@@ -353,7 +362,14 @@ const createApp = () => {
       return res.json({ translated });
     } catch (error) {
       if (error instanceof UpstreamError) {
-        return res.status(error.status).json({ error: error.status === 429 ? "Cloud translation quota exceeded." : "Translation service returned an invalid response." });
+        const message = error.code === "translation_quota_exceeded"
+          ? "Cloud translation quota exceeded or billing is not enabled."
+          : error.code === "translation_credentials_rejected"
+            ? "Gemini rejected the API key or project access."
+            : error.code === "translation_model_unavailable"
+              ? "The configured Gemini model is unavailable for this API key or region."
+              : "Translation service returned an invalid response.";
+        return res.status(error.status).json({ error: message });
       }
       if (error.name === "TimeoutError" || error.name === "AbortError") {
         return res.status(504).json({ error: "Translation service timed out." });

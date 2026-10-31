@@ -436,16 +436,8 @@ const importTextDocument = async (file) => {
   const buffer = await file.arrayBuffer();
   await archiveWithinLimit(buffer);
   if (file.name.toLowerCase().endsWith(".xlsx")) {
-    const workbook = XLSX.read(buffer, { type: "array", cellFormula: true });
-    const cells = [];
-    workbook.SheetNames.forEach((sheetName) => {
-      const sheet = workbook.Sheets[sheetName];
-      Object.keys(sheet).filter((key) => !key.startsWith("!")).forEach((address) => {
-        const cell = sheet[address];
-        if (cell && typeof cell.v === "string" && !cell.f && cell.v.trim()) cells.push({ sheetName, address, text: cell.v });
-      });
-    });
-    if (cells.length > MAX_DOCUMENT_CELLS) throw new Error("Workbook has too many text cells.");
+    const workbook = await XlsxUtils.parseXlsx(buffer, JSZip, { maxSheets: 100, maxCells: 50_000 });
+    const cells = XlsxUtils.collectXlsxTextCells(workbook, MAX_DOCUMENT_CELLS);
     return { kind: "xlsx", name: file.name, workbook, cells };
   }
   if (file.name.toLowerCase().endsWith(".docx")) {
@@ -474,10 +466,7 @@ const translateDocument = async () => {
     const translated = await translateTexts(texts, documentController.signal);
     if (translated.length !== texts.length) throw new Error("Translation service returned incomplete results.");
     if (documentState.kind === "xlsx") {
-      documentState.cells.forEach((cell, index) => {
-        documentState.workbook.Sheets[cell.sheetName][cell.address].v = translated[index];
-        documentState.workbook.Sheets[cell.sheetName][cell.address].t = "s";
-      });
+      XlsxUtils.applyXlsxTranslations(documentState.workbook, documentState.cells, translated);
       documentState.translatedCells = translated;
     } else {
       documentState.translatedParagraphs = translated;
@@ -504,10 +493,10 @@ const exportDocument = async (kind) => {
     downloadBlob(new Blob([text], { type: "text/plain;charset=utf-8" }), `${base}.translated.txt`);
   } else if (kind === "xlsx") {
     if (documentState.kind !== "xlsx") {
-      const sheet = XLSX.utils.aoa_to_sheet(documentState.translatedParagraphs.map((text) => [text]));
-      downloadBlob(new Blob([XLSX.write({ SheetNames: ["Translation"], Sheets: { Translation: sheet } }, { type: "array", bookType: "xlsx" })]), `${base}.translated.xlsx`);
+      const workbook = XlsxUtils.rowsToXlsx("Translation", documentState.translatedParagraphs.map((text) => ({ text })));
+      downloadBlob(await XlsxUtils.buildXlsx(workbook, JSZip), `${base}.translated.xlsx`);
     } else {
-      downloadBlob(new Blob([XLSX.write(documentState.workbook, { type: "array", bookType: "xlsx" })]), `${base}.translated.xlsx`);
+      downloadBlob(await XlsxUtils.buildXlsx(documentState.workbook, JSZip), `${base}.translated.xlsx`);
     }
   } else {
     const paragraphs = documentState.kind === "xlsx" ? documentState.cells.map((cell) => `${cell.sheetName}!${cell.address}: ${cell.text}`) : documentState.translatedParagraphs;
@@ -532,8 +521,7 @@ const exportImage = async (kind) => {
   if (kind === "txt") {
     downloadBlob(new Blob([header + rows.map((row) => `${row.order}. ${row.source}\n${row.translation}`).join("\n\n")], { type: "text/plain;charset=utf-8" }), "image-translation.txt");
   } else if (kind === "xlsx") {
-    const sheet = XLSX.utils.json_to_sheet(rows);
-    downloadBlob(new Blob([XLSX.write({ SheetNames: ["Image Translation"], Sheets: { "Image Translation": sheet } }, { type: "array", bookType: "xlsx" })]), "image-translation.xlsx");
+    downloadBlob(await XlsxUtils.buildXlsx(XlsxUtils.rowsToXlsx("Image Translation", rows), JSZip), "image-translation.xlsx");
   } else {
     const paragraphs = [header, ...rows.map((row) => `${row.order}. ${row.source}\n${row.translation}`)];
     downloadBlob(await makeDocx(paragraphs), "image-translation.docx");
